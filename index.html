@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Music Planet Visualizer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: #fff;
+    }
+
+    canvas { display: block; }
+
+    #overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.85);
+      z-index: 100;
+      transition: opacity 0.8s;
+    }
+
+    #overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #start-panel {
+      text-align: center;
+      max-width: 500px;
+      padding: 40px;
+    }
+
+    #start-panel h1 {
+      font-size: 28px;
+      font-weight: 300;
+      margin-bottom: 12px;
+      letter-spacing: 2px;
+    }
+
+    #start-panel p {
+      font-size: 14px;
+      color: #888;
+      margin-bottom: 30px;
+      line-height: 1.6;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 14px 36px;
+      border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 30px;
+      background: transparent;
+      color: #fff;
+      font-size: 15px;
+      cursor: pointer;
+      transition: all 0.3s;
+      letter-spacing: 1px;
+      margin: 6px;
+    }
+
+    .btn:hover {
+      background: rgba(255,255,255,0.1);
+      border-color: rgba(255,255,255,0.6);
+    }
+
+    .btn.primary {
+      background: rgba(100, 140, 255, 0.2);
+      border-color: rgba(100, 140, 255, 0.5);
+    }
+
+    .btn.primary:hover {
+      background: rgba(100, 140, 255, 0.35);
+    }
+
+    #hud {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      opacity: 0;
+      transition: opacity 0.5s;
+      z-index: 50;
+    }
+
+    #hud.visible { opacity: 1; }
+
+    #hud .bar-container {
+      display: flex;
+      gap: 2px;
+      align-items: flex-end;
+      height: 30px;
+    }
+
+    #hud .bar {
+      width: 3px;
+      background: rgba(150, 180, 255, 0.6);
+      border-radius: 1px;
+      transition: height 0.05s;
+    }
+
+    #hud .label {
+      font-size: 11px;
+      color: #666;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    #info {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      font-size: 11px;
+      color: #444;
+      z-index: 50;
+      text-align: right;
+      line-height: 1.6;
+    }
+
+    #file-input { display: none; }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <div id="start-panel">
+      <h1>MUSIC PLANET VISUALIZER</h1>
+      <p>
+        Capture your system audio to drive the visualizer, or load a music file.
+        Planets orbit, pulse, and emit particles in response to the music.
+      </p>
+      <button class="btn primary" id="btn-capture">Capture System Audio</button>
+      <button class="btn" id="btn-file">Load Audio File</button>
+      <button class="btn" id="btn-demo">Demo Mode (No Audio)</button>
+      <input type="file" id="file-input" accept="audio/*">
+    </div>
+  </div>
+
+  <div id="hud">
+    <span class="label">Audio</span>
+    <div class="bar-container" id="hud-bars"></div>
+  </div>
+
+  <div id="info">
+    <div id="info-text"></div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="visualizer.js"></script>
+</body>
+</html>
