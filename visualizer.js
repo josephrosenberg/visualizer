@@ -860,6 +860,10 @@ class Visualizer {
           this.particles.setCount(this.particleCount);
           this._updateInfo();
           break;
+        case 'b':
+          this.nebula.toggle();
+          this._updateInfo();
+          break;
       }
     });
 
