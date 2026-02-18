@@ -19,14 +19,14 @@ const PALETTES = [
 // ─── Visual Modes ────────────────────────────────────────────────────────────
 
 const MODES = [
-  { name: 'Classic',       coreVisible: true,  wireframe: false, metalness: 0.8, roughness: 0.15, rayStyle: 'ribbon',  trailLen: 30 },
-  { name: 'Wireframe',     coreVisible: true,  wireframe: true,  metalness: 0.5, roughness: 0.3,  rayStyle: 'line',    trailLen: 40 },
-  { name: 'Rays Only',     coreVisible: false, wireframe: false, metalness: 0,   roughness: 0,    rayStyle: 'ribbon',  trailLen: 35 },
-  { name: 'Points',        coreVisible: true,  wireframe: false, metalness: 0.9, roughness: 0.1,  rayStyle: 'point',   trailLen: 0  },
-  { name: 'Long Trails',   coreVisible: true,  wireframe: false, metalness: 0.7, roughness: 0.2,  rayStyle: 'ribbon',  trailLen: 60 },
-  { name: 'Wire Rays',     coreVisible: true,  wireframe: true,  metalness: 0.4, roughness: 0.4,  rayStyle: 'line',    trailLen: 25 },
-  { name: 'Ghost',         coreVisible: false, wireframe: false, metalness: 0,   roughness: 0,    rayStyle: 'line',    trailLen: 50 },
-  { name: 'Dense',         coreVisible: true,  wireframe: false, metalness: 0.85,roughness: 0.12, rayStyle: 'ribbon',  trailLen: 20 },
+  { name: 'Classic',       coreVisible: true,  wireframe: false, metalness: 0.8, roughness: 0.15, rayStyle: 'ribbon',  trailLen: 30, particleMul: 1.0 },
+  { name: 'Wireframe',     coreVisible: true,  wireframe: true,  metalness: 0.5, roughness: 0.3,  rayStyle: 'line',    trailLen: 40, particleMul: 1.0 },
+  { name: 'Rays Only',     coreVisible: false, wireframe: false, metalness: 0,   roughness: 0,    rayStyle: 'ribbon',  trailLen: 35, particleMul: 1.0 },
+  { name: 'Points',        coreVisible: true,  wireframe: false, metalness: 0.9, roughness: 0.1,  rayStyle: 'point',   trailLen: 0,  particleMul: 1.0 },
+  { name: 'Long Trails',   coreVisible: true,  wireframe: false, metalness: 0.7, roughness: 0.2,  rayStyle: 'ribbon',  trailLen: 60, particleMul: 1.0 },
+  { name: 'Wire Rays',     coreVisible: true,  wireframe: true,  metalness: 0.4, roughness: 0.4,  rayStyle: 'line',    trailLen: 25, particleMul: 1.0 },
+  { name: 'Ghost',         coreVisible: false, wireframe: false, metalness: 0,   roughness: 0,    rayStyle: 'line',    trailLen: 50, particleMul: 1.0 },
+  { name: 'Dense',         coreVisible: true,  wireframe: false, metalness: 0.6, roughness: 0.3,  rayStyle: 'ribbon',  trailLen: 50, particleMul: 2.5 },
 ];
 
 // ─── Audio Analyzer ──────────────────────────────────────────────────────────
@@ -588,8 +588,9 @@ class Nebula {
 
       // Radial gradient blob
       const gradient = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
-      gradient.addColorStop(0, 'rgba(100,120,180,0.12)');
-      gradient.addColorStop(0.4, 'rgba(60,80,140,0.06)');
+      gradient.addColorStop(0, 'rgba(140,160,220,0.45)');
+      gradient.addColorStop(0.3, 'rgba(100,120,180,0.25)');
+      gradient.addColorStop(0.6, 'rgba(60,80,140,0.10)');
       gradient.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, 256, 256);
@@ -615,7 +616,7 @@ class Nebula {
       sprite.scale.setScalar(12 + Math.random() * 18);
 
       scene.add(sprite);
-      this.sprites.push({ sprite, mat: spriteMat, baseOpacity: 0.06 + Math.random() * 0.08 });
+      this.sprites.push({ sprite, mat: spriteMat, baseOpacity: 0.25 + Math.random() * 0.2 });
     }
   }
 
@@ -628,7 +629,7 @@ class Nebula {
     const targetOpacity = this.enabled ? 1.0 : 0;
 
     for (const s of this.sprites) {
-      const target = targetOpacity * (s.baseOpacity + volume * 0.08);
+      const target = targetOpacity * (s.baseOpacity + volume * 0.25);
       s.mat.opacity = THREE.MathUtils.lerp(s.mat.opacity, target, 0.05);
       s.sprite.rotation.z += 0.0003;
     }
@@ -732,6 +733,9 @@ class Visualizer {
     this.particles = null;
     this.nebula = null;
     this.frozen = false;
+    this.frozenAtTime = 0;   // wall-clock time when freeze was activated
+    this.frozenOffset = 0;   // accumulated time spent frozen
+    this.smoothFrozen = 0;   // for smooth camera transition
     this.modeIndex = 0;
     this.paletteIndex = 0;
     this.particleCount = 1500;
@@ -825,6 +829,10 @@ class Visualizer {
     this.particles.applyMode(mode, palette);
     this.nebula.applyPalette(palette);
 
+    // Apply particle multiplier from mode
+    const effectiveCount = Math.min(5000, Math.round(this.particleCount * (mode.particleMul || 1.0)));
+    this.particles.setCount(effectiveCount);
+
     this.scene.background.set(palette.bg);
     this.scene.fog.color.set(palette.bg);
 
@@ -871,6 +879,11 @@ class Visualizer {
           break;
         case 'f':
           this.frozen = !this.frozen;
+          if (this.frozen) {
+            this.frozenAtTime = this.clock.getElapsedTime();
+          } else {
+            this.frozenOffset += this.clock.getElapsedTime() - this.frozenAtTime;
+          }
           this._updateInfo();
           break;
         case 'n':
@@ -937,9 +950,17 @@ class Visualizer {
   _animate() {
     requestAnimationFrame(() => this._animate());
 
-    const time = this.clock.getElapsedTime();
+    const wallTime = this.clock.getElapsedTime();
     const dt = this.clock.getDelta();
     this.audio.update();
+
+    // Compute simulation time that pauses when frozen
+    let simTime;
+    if (this.frozen) {
+      simTime = this.frozenAtTime - this.frozenOffset;
+    } else {
+      simTime = wallTime - this.frozenOffset;
+    }
 
     const bass = this.audio.getBass();
     const mid = this.audio.getMid();
@@ -947,10 +968,14 @@ class Visualizer {
     const volume = this.audio.getVolume();
     const beat = this.audio.isBeat();
 
+    // Smooth the freeze camera offset
+    const frozenTarget = this.frozen ? 1 : 0;
+    this.smoothFrozen = THREE.MathUtils.lerp(this.smoothFrozen, frozenTarget, 0.06);
+
     // Camera: slow orbit, distance reacts to bass
-    const camTheta = time * 0.08;
-    const camPhi = 0.3 + Math.sin(time * 0.05) * 0.15;
-    const camDist = 12 - bass * 2.5 + (this.frozen ? 3 : 0);
+    const camTheta = wallTime * 0.08;
+    const camPhi = 0.3 + Math.sin(wallTime * 0.05) * 0.15;
+    const camDist = 12 - bass * 2.5 + this.smoothFrozen * 3;
     this.camera.position.set(
       Math.sin(camTheta) * Math.cos(camPhi) * camDist,
       Math.sin(camPhi) * camDist * 0.5 + 1.5 + mid,
@@ -965,7 +990,7 @@ class Visualizer {
 
     // Update cores
     for (const core of this.cores) {
-      core.update(time, this.audio, this.frozen);
+      core.update(simTime, this.audio, this.frozen);
       // Glow intensity
       core.glowMat.uniforms.uIntensity.value = 1.5 + bass * 3.0 + (beat ? 2.0 : 0);
     }
