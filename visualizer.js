@@ -195,8 +195,35 @@ class Core {
     this.velocity = new THREE.Vector3();
     this.radius = 0.4 + Math.random() * 0.3;
 
-    // Metallic sphere
-    const geo = new THREE.IcosahedronGeometry(this.radius, 4);
+    // Metallic sphere with enough subdivisions for visible displacement
+    const geo = new THREE.IcosahedronGeometry(this.radius, 5);
+    this.geometry = geo;
+
+    // Store original vertex positions for displacement reference
+    const posAttr = geo.getAttribute('position');
+    this.originalPositions = new Float32Array(posAttr.array.length);
+    this.originalPositions.set(posAttr.array);
+
+    // Precompute per-vertex normals and spherical coords for displacement patterns
+    this.vertexNormals = new Float32Array(posAttr.count * 3);
+    this.vertexTheta = new Float32Array(posAttr.count);
+    this.vertexPhi = new Float32Array(posAttr.count);
+    for (let i = 0; i < posAttr.count; i++) {
+      const i3 = i * 3;
+      const x = this.originalPositions[i3];
+      const y = this.originalPositions[i3 + 1];
+      const z = this.originalPositions[i3 + 2];
+      const len = Math.sqrt(x * x + y * y + z * z) || 1;
+      this.vertexNormals[i3] = x / len;
+      this.vertexNormals[i3 + 1] = y / len;
+      this.vertexNormals[i3 + 2] = z / len;
+      this.vertexTheta[i] = Math.atan2(z, x);
+      this.vertexPhi[i] = Math.acos(Math.max(-1, Math.min(1, y / len)));
+    }
+
+    // Unique seed per planet for distinct displacement patterns
+    this.displaceSeed = index * 137.5 + 42.0;
+
     this.material = new THREE.MeshStandardMaterial({
       color: 0x888899,
       metalness: 0.85,
@@ -223,6 +250,61 @@ class Core {
     this.mesh.position.copy(this.position);
     this.mesh.rotation.y += 0.005;
     this.mesh.rotation.x += 0.003;
+
+    // Vertex displacement driven by audio
+    this._displaceVertices(time, audio);
+  }
+
+  _displaceVertices(time, audio) {
+    const bass = audio.getBass();
+    const mid = audio.getMid();
+    const treble = audio.getTreble();
+    const beat = audio.isBeat();
+
+    const posAttr = this.geometry.getAttribute('position');
+    const positions = posAttr.array;
+    const seed = this.displaceSeed;
+
+    // Displacement amplitudes (fraction of radius)
+    const bassAmp = bass * 0.18;            // broad, slow warping
+    const midAmp = mid * 0.10;              // medium-frequency bumps
+    const trebleAmp = treble * 0.06;        // fine detail ripples
+    const beatPulse = beat ? 0.05 : 0;      // pop on beat
+
+    const t = time * 0.8;
+
+    for (let i = 0; i < posAttr.count; i++) {
+      const i3 = i * 3;
+      const nx = this.vertexNormals[i3];
+      const ny = this.vertexNormals[i3 + 1];
+      const nz = this.vertexNormals[i3 + 2];
+      const theta = this.vertexTheta[i];
+      const phi = this.vertexPhi[i];
+
+      // Low-frequency warp (bass): 2-3 large lobes
+      const bassDisp = Math.sin(theta * 2.0 + t * 1.2 + seed)
+                      * Math.sin(phi * 1.5 + t * 0.7)
+                      * bassAmp;
+
+      // Mid-frequency bumps: 4-6 lobes
+      const midDisp = Math.sin(theta * 5.0 + t * 2.0 + seed * 0.7)
+                     * Math.cos(phi * 4.0 - t * 1.3 + seed * 0.3)
+                     * midAmp;
+
+      // High-frequency ripples (treble): many small bumps
+      const trebleDisp = Math.sin(theta * 10.0 + t * 4.0 + seed * 1.3)
+                        * Math.sin(phi * 8.0 + t * 3.0 - seed * 0.5)
+                        * trebleAmp;
+
+      const totalDisp = bassDisp + midDisp + trebleDisp + beatPulse;
+
+      positions[i3]     = this.originalPositions[i3]     + nx * totalDisp;
+      positions[i3 + 1] = this.originalPositions[i3 + 1] + ny * totalDisp;
+      positions[i3 + 2] = this.originalPositions[i3 + 2] + nz * totalDisp;
+    }
+
+    posAttr.needsUpdate = true;
+    this.geometry.computeVertexNormals();
   }
 
   applyMode(mode, palette) {
@@ -701,6 +783,17 @@ class Visualizer {
     this.particleCount = 1500;
     this.clock = new THREE.Clock();
 
+    // Camera drama state
+    this.camOrbitSpeed = 0.08;         // base orbit speed
+    this.camTargetOrbitSpeed = 0.08;
+    this.camHeightOffset = 0;          // smooth height variation
+    this.camTargetHeight = 0;
+    this.camDistOffset = 0;            // smooth distance offset
+    this.camTargetDist = 0;
+    this.camShake = new THREE.Vector3(); // beat shake
+    this.camDramaTimer = 0;            // timer for periodic drama changes
+    this.camDramaPhase = 0;            // which drama "move" we're in
+
     this._initRenderer();
     this._initScene();
     this._initCores();
@@ -932,14 +1025,66 @@ class Visualizer {
     const volume = this.audio.getVolume();
     const beat = this.audio.isBeat();
 
-    // Camera: slow orbit, distance reacts to bass
-    const camTheta = wallTime * 0.08;
-    const camPhi = 0.3 + Math.sin(wallTime * 0.05) * 0.15;
-    const camDist = 12 - bass * 2.5;
+    // Camera drama: varied movement with periodic changes
+    this.camDramaTimer += dt;
+
+    // Every 8-15 seconds, pick a new camera "move"
+    if (this.camDramaTimer > 8 + this.camDramaPhase * 3) {
+      this.camDramaTimer = 0;
+      this.camDramaPhase = (this.camDramaPhase + 1) % 5;
+
+      switch (this.camDramaPhase) {
+        case 0: // Normal orbit
+          this.camTargetOrbitSpeed = 0.08;
+          this.camTargetHeight = 0;
+          this.camTargetDist = 0;
+          break;
+        case 1: // Slow pull-back, higher angle
+          this.camTargetOrbitSpeed = 0.05;
+          this.camTargetHeight = 2.5;
+          this.camTargetDist = 3.0;
+          break;
+        case 2: // Faster sweep, level angle
+          this.camTargetOrbitSpeed = 0.13;
+          this.camTargetHeight = -0.5;
+          this.camTargetDist = -1.0;
+          break;
+        case 3: // Slow drift, slight low angle
+          this.camTargetOrbitSpeed = 0.04;
+          this.camTargetHeight = -1.0;
+          this.camTargetDist = 1.5;
+          break;
+        case 4: // Medium speed, high sweep
+          this.camTargetOrbitSpeed = 0.10;
+          this.camTargetHeight = 3.0;
+          this.camTargetDist = -0.5;
+          break;
+      }
+    }
+
+    // Smooth lerp toward targets (slow transitions = not jarring)
+    const camLerp = 0.012;
+    this.camOrbitSpeed = THREE.MathUtils.lerp(this.camOrbitSpeed, this.camTargetOrbitSpeed, camLerp);
+    this.camHeightOffset = THREE.MathUtils.lerp(this.camHeightOffset, this.camTargetHeight, camLerp);
+    this.camDistOffset = THREE.MathUtils.lerp(this.camDistOffset, this.camTargetDist, camLerp);
+
+    // Beat shake: small impulse that decays quickly
+    if (beat) {
+      this.camShake.set(
+        (Math.random() - 0.5) * 0.15,
+        (Math.random() - 0.5) * 0.10,
+        (Math.random() - 0.5) * 0.15
+      );
+    }
+    this.camShake.multiplyScalar(0.88); // decay
+
+    const camTheta = wallTime * this.camOrbitSpeed;
+    const camPhi = 0.3 + Math.sin(wallTime * 0.05) * 0.15 + this.camHeightOffset * 0.06;
+    const camDist = 12 + this.camDistOffset - bass * 2.5;
     this.camera.position.set(
-      Math.sin(camTheta) * Math.cos(camPhi) * camDist,
-      Math.sin(camPhi) * camDist * 0.5 + 1.5 + mid,
-      Math.cos(camTheta) * Math.cos(camPhi) * camDist
+      Math.sin(camTheta) * Math.cos(camPhi) * camDist + this.camShake.x,
+      Math.sin(camPhi) * camDist * 0.5 + 1.5 + mid + this.camHeightOffset * 0.3 + this.camShake.y,
+      Math.cos(camTheta) * Math.cos(camPhi) * camDist + this.camShake.z
     );
     this.camera.lookAt(0, 0, 0);
 
