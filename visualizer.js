@@ -846,8 +846,21 @@ class Visualizer {
       this.composer.setSize(window.innerWidth, window.innerHeight);
     });
 
+    this.helpEl = document.getElementById('help-overlay');
+
     window.addEventListener('keydown', (e) => {
-      switch (e.key.toLowerCase()) {
+      const key = e.key;
+
+      if (key === '?' || key === '/') {
+        this.helpEl.classList.toggle('visible');
+        return;
+      }
+      if (key === 'Escape') {
+        this.helpEl.classList.remove('visible');
+        return;
+      }
+
+      switch (key.toLowerCase()) {
         case 'm':
           this.modeIndex = (this.modeIndex + 1) % MODES.length;
           this._applyModeAndPalette();

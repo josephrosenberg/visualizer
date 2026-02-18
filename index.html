@@ -124,6 +124,71 @@
     }
 
     #file-input { display: none; }
+
+    #help-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.82);
+      z-index: 200;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+
+    #help-overlay.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    #help-panel {
+      text-align: left;
+      max-width: 360px;
+      padding: 36px 44px;
+    }
+
+    #help-panel h2 {
+      font-size: 14px;
+      font-weight: 300;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      color: #999;
+      margin-bottom: 20px;
+    }
+
+    #help-panel .help-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      font-size: 13px;
+      color: #888;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+
+    #help-panel .help-row:last-child { border-bottom: none; }
+
+    #help-panel .help-row kbd {
+      display: inline-block;
+      padding: 2px 8px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 11px;
+      color: #aaa;
+      min-width: 26px;
+      text-align: center;
+    }
+
+    #help-panel .help-dismiss {
+      margin-top: 20px;
+      font-size: 11px;
+      color: #555;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -149,6 +214,20 @@
     </div>
   </div>
 
+  <div id="help-overlay">
+    <div id="help-panel">
+      <h2>Controls</h2>
+      <div class="help-row"><span>Cycle visual mode</span> <kbd>M</kbd></div>
+      <div class="help-row"><span>Cycle color palette</span> <kbd>P</kbd></div>
+      <div class="help-row"><span>Freeze cores</span> <kbd>F</kbd></div>
+      <div class="help-row"><span>Toggle nebula</span> <kbd>N</kbd></div>
+      <div class="help-row"><span>Add particles</span> <kbd>A</kbd></div>
+      <div class="help-row"><span>Remove particles</span> <kbd>S</kbd></div>
+      <div class="help-row"><span>Show / hide help</span> <kbd>?</kbd></div>
+      <div class="help-dismiss">Press <kbd>?</kbd> or <kbd>Esc</kbd> to close</div>
+    </div>
+  </div>
+
   <div id="info">
     <div id="info-text"></div>
   </div>
@@ -161,6 +240,6 @@
     }
   }
   </script>
-  <script type="module" src="visualizer.js?v=2"></script>
+  <script type="module" src="visualizer.js?v=3"></script>
 </body>
 </html>
