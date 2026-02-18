@@ -265,11 +265,11 @@ class Core {
     const positions = posAttr.array;
     const seed = this.displaceSeed;
 
-    // Displacement amplitudes (fraction of radius)
-    const bassAmp = bass * 0.18;            // broad, slow warping
-    const midAmp = mid * 0.10;              // medium-frequency bumps
-    const trebleAmp = treble * 0.06;        // fine detail ripples
-    const beatPulse = beat ? 0.05 : 0;      // pop on beat
+    // Spike amplitudes — stronger than before, spikes not lumps
+    const bassAmp = bass * 0.35;
+    const midAmp = mid * 0.22;
+    const trebleAmp = treble * 0.14;
+    const beatPulse = beat ? 0.12 : 0;
 
     const t = time * 0.8;
 
@@ -281,22 +281,24 @@ class Core {
       const theta = this.vertexTheta[i];
       const phi = this.vertexPhi[i];
 
-      // Low-frequency warp (bass): 2-3 large lobes
-      const bassDisp = Math.sin(theta * 2.0 + t * 1.2 + seed)
-                      * Math.sin(phi * 1.5 + t * 0.7)
-                      * bassAmp;
+      // Bass spikes: few large sharp protrusions
+      // Use max(0, sin)^power to create narrow outward spikes from a smooth sphere
+      const bassRaw = Math.sin(theta * 2.0 + t * 1.2 + seed)
+                    * Math.sin(phi * 1.5 + t * 0.7);
+      const bassSpike = Math.pow(Math.max(0, bassRaw), 3.0) * bassAmp;
 
-      // Mid-frequency bumps: 4-6 lobes
-      const midDisp = Math.sin(theta * 5.0 + t * 2.0 + seed * 0.7)
-                     * Math.cos(phi * 4.0 - t * 1.3 + seed * 0.3)
-                     * midAmp;
+      // Mid spikes: more numerous, sharp ridges
+      const midRaw = Math.sin(theta * 5.0 + t * 2.0 + seed * 0.7)
+                   * Math.cos(phi * 4.0 - t * 1.3 + seed * 0.3);
+      const midSpike = Math.pow(Math.max(0, midRaw), 2.5) * midAmp;
 
-      // High-frequency ripples (treble): many small bumps
-      const trebleDisp = Math.sin(theta * 10.0 + t * 4.0 + seed * 1.3)
-                        * Math.sin(phi * 8.0 + t * 3.0 - seed * 0.5)
-                        * trebleAmp;
+      // Treble spikes: many thin needles
+      const trebRaw = Math.sin(theta * 12.0 + t * 4.0 + seed * 1.3)
+                    * Math.sin(phi * 10.0 + t * 3.0 - seed * 0.5);
+      const trebSpike = Math.pow(Math.max(0, trebRaw), 2.0) * trebleAmp;
 
-      const totalDisp = bassDisp + midDisp + trebleDisp + beatPulse;
+      // All displacement is outward only (spikes from sphere, never inward)
+      const totalDisp = bassSpike + midSpike + trebSpike + beatPulse;
 
       positions[i3]     = this.originalPositions[i3]     + nx * totalDisp;
       positions[i3 + 1] = this.originalPositions[i3 + 1] + ny * totalDisp;
@@ -788,8 +790,8 @@ class Visualizer {
     this.camTargetOrbitSpeed = 0.08;
     this.camHeightOffset = 0;          // smooth height variation
     this.camTargetHeight = 0;
-    this.camDistOffset = 0;            // smooth distance offset
-    this.camTargetDist = 0;
+    this.camDistOffset = 10;           // camera distance (absolute)
+    this.camTargetDist = 10;
     this.camShake = new THREE.Vector3(); // beat shake
     this.camDramaTimer = 0;            // timer for periodic drama changes
     this.camDramaPhase = 0;            // which drama "move" we're in
@@ -1028,42 +1030,52 @@ class Visualizer {
     // Camera drama: varied movement with periodic changes
     this.camDramaTimer += dt;
 
-    // Every 8-15 seconds, pick a new camera "move"
-    if (this.camDramaTimer > 8 + this.camDramaPhase * 3) {
+    // Every 8-16 seconds, pick a new camera "move"
+    if (this.camDramaTimer > 8 + this.camDramaPhase * 2) {
       this.camDramaTimer = 0;
-      this.camDramaPhase = (this.camDramaPhase + 1) % 5;
+      this.camDramaPhase = (this.camDramaPhase + 1) % 7;
 
       switch (this.camDramaPhase) {
-        case 0: // Normal orbit
+        case 0: // Medium orbit — default establishing view
           this.camTargetOrbitSpeed = 0.08;
           this.camTargetHeight = 0;
-          this.camTargetDist = 0;
+          this.camTargetDist = 10;
           break;
-        case 1: // Slow pull-back, higher angle
+        case 1: // Close fly-by — amongst the planets
+          this.camTargetOrbitSpeed = 0.06;
+          this.camTargetHeight = -0.3;
+          this.camTargetDist = 4.0;
+          break;
+        case 2: // Wide pull-back, high angle — see the whole system
           this.camTargetOrbitSpeed = 0.05;
-          this.camTargetHeight = 2.5;
+          this.camTargetHeight = 3.5;
+          this.camTargetDist = 15.0;
+          break;
+        case 3: // Tight low orbit — skimming planet surfaces
+          this.camTargetOrbitSpeed = 0.10;
+          this.camTargetHeight = -1.0;
           this.camTargetDist = 3.0;
           break;
-        case 2: // Faster sweep, level angle
-          this.camTargetOrbitSpeed = 0.13;
-          this.camTargetHeight = -0.5;
-          this.camTargetDist = -1.0;
-          break;
-        case 3: // Slow drift, slight low angle
+        case 4: // Slow drift, medium distance
           this.camTargetOrbitSpeed = 0.04;
-          this.camTargetHeight = -1.0;
-          this.camTargetDist = 1.5;
+          this.camTargetHeight = 1.0;
+          this.camTargetDist = 8.0;
           break;
-        case 4: // Medium speed, high sweep
-          this.camTargetOrbitSpeed = 0.10;
-          this.camTargetHeight = 3.0;
-          this.camTargetDist = -0.5;
+        case 5: // Very close pass — planet fills the view
+          this.camTargetOrbitSpeed = 0.07;
+          this.camTargetHeight = 0.2;
+          this.camTargetDist = 2.5;
+          break;
+        case 6: // Fast sweep, level — cinematic fly-through
+          this.camTargetOrbitSpeed = 0.14;
+          this.camTargetHeight = -0.5;
+          this.camTargetDist = 5.5;
           break;
       }
     }
 
     // Smooth lerp toward targets (slow transitions = not jarring)
-    const camLerp = 0.012;
+    const camLerp = 0.015;
     this.camOrbitSpeed = THREE.MathUtils.lerp(this.camOrbitSpeed, this.camTargetOrbitSpeed, camLerp);
     this.camHeightOffset = THREE.MathUtils.lerp(this.camHeightOffset, this.camTargetHeight, camLerp);
     this.camDistOffset = THREE.MathUtils.lerp(this.camDistOffset, this.camTargetDist, camLerp);
@@ -1080,10 +1092,10 @@ class Visualizer {
 
     const camTheta = wallTime * this.camOrbitSpeed;
     const camPhi = 0.3 + Math.sin(wallTime * 0.05) * 0.15 + this.camHeightOffset * 0.06;
-    const camDist = 12 + this.camDistOffset - bass * 2.5;
+    const camDist = this.camDistOffset - bass * 2.0;
     this.camera.position.set(
       Math.sin(camTheta) * Math.cos(camPhi) * camDist + this.camShake.x,
-      Math.sin(camPhi) * camDist * 0.5 + 1.5 + mid + this.camHeightOffset * 0.3 + this.camShake.y,
+      Math.sin(camPhi) * camDist * 0.4 + 1.0 + mid * 0.5 + this.camHeightOffset * 0.3 + this.camShake.y,
       Math.cos(camTheta) * Math.cos(camPhi) * camDist + this.camShake.z
     );
     this.camera.lookAt(0, 0, 0);
