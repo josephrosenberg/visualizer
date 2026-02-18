@@ -206,42 +206,6 @@ class Core {
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.castShadow = true;
     scene.add(this.mesh);
-
-    // Glow
-    const glowGeo = new THREE.IcosahedronGeometry(this.radius * 1.5, 3);
-    this.glowMat = new THREE.ShaderMaterial({
-      vertexShader: `
-        varying vec3 vNormal;
-        varying vec3 vViewDir;
-        void main() {
-          vNormal = normalize(normalMatrix * normal);
-          vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-          vViewDir = normalize(-mvPos.xyz);
-          gl_Position = projectionMatrix * mvPos;
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 uColor;
-        uniform float uIntensity;
-        varying vec3 vNormal;
-        varying vec3 vViewDir;
-        void main() {
-          float rim = 1.0 - max(dot(vNormal, vViewDir), 0.0);
-          rim = pow(rim, 3.5) * uIntensity;
-          gl_FragColor = vec4(uColor, rim * 0.6);
-        }
-      `,
-      uniforms: {
-        uColor: { value: new THREE.Color(0x6688cc) },
-        uIntensity: { value: 1.5 },
-      },
-      transparent: true,
-      side: THREE.BackSide,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-    this.glow = new THREE.Mesh(glowGeo, this.glowMat);
-    scene.add(this.glow);
   }
 
   update(time, audio, frozen) {
@@ -257,19 +221,16 @@ class Core {
     }
 
     this.mesh.position.copy(this.position);
-    this.glow.position.copy(this.position);
     this.mesh.rotation.y += 0.005;
     this.mesh.rotation.x += 0.003;
   }
 
   applyMode(mode, palette) {
     this.mesh.visible = mode.coreVisible;
-    this.glow.visible = mode.coreVisible;
     this.material.wireframe = mode.wireframe;
     this.material.metalness = mode.metalness;
     this.material.roughness = mode.roughness;
     this.material.color.set(palette.core);
-    this.glowMat.uniforms.uColor.value.set(palette.rayInner);
   }
 }
 
@@ -735,7 +696,6 @@ class Visualizer {
     this.frozen = false;
     this.frozenAtTime = 0;   // wall-clock time when freeze was activated
     this.frozenOffset = 0;   // accumulated time spent frozen
-    this.smoothFrozen = 0;   // for smooth camera transition
     this.modeIndex = 0;
     this.paletteIndex = 0;
     this.particleCount = 1500;
@@ -887,8 +847,8 @@ class Visualizer {
           this._updateInfo();
           break;
         case 'n':
-          this.nebula.toggle();
-          this._updateInfo();
+          this.modeIndex = (this.modeIndex - 1 + MODES.length) % MODES.length;
+          this._applyModeAndPalette();
           break;
         case 'a':
           this.particleCount = Math.min(5000, this.particleCount + 200);
@@ -968,14 +928,10 @@ class Visualizer {
     const volume = this.audio.getVolume();
     const beat = this.audio.isBeat();
 
-    // Smooth the freeze camera offset
-    const frozenTarget = this.frozen ? 1 : 0;
-    this.smoothFrozen = THREE.MathUtils.lerp(this.smoothFrozen, frozenTarget, 0.06);
-
     // Camera: slow orbit, distance reacts to bass
     const camTheta = wallTime * 0.08;
     const camPhi = 0.3 + Math.sin(wallTime * 0.05) * 0.15;
-    const camDist = 12 - bass * 2.5 + this.smoothFrozen * 3;
+    const camDist = 12 - bass * 2.5;
     this.camera.position.set(
       Math.sin(camTheta) * Math.cos(camPhi) * camDist,
       Math.sin(camPhi) * camDist * 0.5 + 1.5 + mid,
@@ -991,8 +947,6 @@ class Visualizer {
     // Update cores
     for (const core of this.cores) {
       core.update(simTime, this.audio, this.frozen);
-      // Glow intensity
-      core.glowMat.uniforms.uIntensity.value = 1.5 + bass * 3.0 + (beat ? 2.0 : 0);
     }
 
     // Update magnetic particles
