@@ -192,9 +192,7 @@ const PLANET_VERTEX = /* glsl */ `
   varying vec3 vViewDir;
 
   void main() {
-    // Subtle uniform scale pulse on beat
-    float pulse = 1.0 + uBeat * 0.03 + uBass * 0.02;
-    vec3 pos = position * pulse;
+    vec3 pos = position;
 
     vec4 worldPos = modelMatrix * vec4(pos, 1.0);
     vWorldPos = worldPos.xyz;
@@ -240,8 +238,8 @@ const PLANET_FRAGMENT = /* glsl */ `
 
     vec3 baseColor = uColorCore;
 
-    // Beat emissive pulse
-    float emissiveStrength = uBeat * 0.4;
+    // Gentle volume-based emissive glow
+    float emissiveStrength = uBass * 0.15 + uMid * 0.1;
     vec3 emissive = uColorInner * emissiveStrength;
 
     // Combine
@@ -274,21 +272,21 @@ class Core {
     // Lifecycle state
     this.phase = 'spawning'; // 'spawning' | 'alive' | 'collapsing' | 'dead'
     this.phaseTime = 0;
-    this.spawnDuration = 1.5 + Math.random() * 1.0;
-    this.lifeDuration = 15 + Math.random() * 25; // 15-40 seconds alive
-    this.collapseDuration = 1.2 + Math.random() * 0.8;
+    this.spawnDuration = 3.0 + Math.random() * 2.0;
+    this.lifeDuration = 30 + Math.random() * 40; // 30-70 seconds alive
+    this.collapseDuration = 3.0 + Math.random() * 2.0;
     this.scaleT = 0; // 0..1 animated scale factor
 
     this.charge = (Math.random() > 0.5) ? 1.0 : -0.8;
-    this.orbitRadius = 1.2 + Math.random() * 2.5;
-    this.orbitSpeed = 0.15 + Math.random() * 0.35;
+    this.orbitRadius = 2.5 + Math.random() * 3.5;
+    this.orbitSpeed = 0.06 + Math.random() * 0.12;
     this.orbitPhase = Math.random() * Math.PI * 2;
-    this.orbitTilt = (Math.random() - 0.5) * 1.4;
+    this.orbitTilt = (Math.random() - 0.5) * 0.8;
     this.position = new THREE.Vector3();
     this.velocity = new THREE.Vector3();
-    this.radius = 0.3 + Math.random() * 0.4;
+    this.radius = 0.8 + Math.random() * 0.7;
 
-    const geo = new THREE.IcosahedronGeometry(this.radius, 3);
+    const geo = new THREE.IcosahedronGeometry(this.radius, 4);
     this.geometry = geo;
 
     this.uniforms = {
@@ -836,17 +834,15 @@ class Visualizer {
     this.clock = new THREE.Clock();
 
     // Camera state
-    this.camPos = new THREE.Vector3(0, 3, 12);
-    this.camTargetPos = new THREE.Vector3(0, 3, 12);
+    this.camPos = new THREE.Vector3(0, 4, 16);
+    this.camTargetPos = new THREE.Vector3(0, 4, 16);
     this.camLookAt = new THREE.Vector3(0, 0, 0);
     this.camTargetLookAt = new THREE.Vector3(0, 0, 0);
-    this.camShake = new THREE.Vector3();
     this.camMoveTimer = 0;
     this.camMoveDuration = 8;
     this.camMode = 'orbit';  // 'orbit' | 'track' | 'flyby' | 'overhead' | 'dolly'
     this.camTrackCore = null;
     this.camOrbitAngle = 0;
-    this.camBeatZoom = 0; // transient zoom punch on beats
 
     this._initRenderer();
     this._initScene();
@@ -872,8 +868,8 @@ class Visualizer {
     this.scene.background = new THREE.Color(0x000008);
     this.scene.fog = new THREE.FogExp2(0x000008, 0.008);
 
-    this.camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 300);
-    this.camera.position.set(0, 3, 12);
+    this.camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 400);
+    this.camera.position.set(0, 4, 16);
     this.camera.lookAt(0, 0, 0);
 
     // Subtle ambient
@@ -1109,16 +1105,14 @@ class Visualizer {
     const modes = ['orbit', 'track', 'flyby', 'overhead', 'dolly', 'orbit', 'track'];
     this.camMode = modes[Math.floor(Math.random() * modes.length)];
     this.camTrackCore = this._pickRandomAliveCore();
-    this.camMoveDuration = 6 + Math.random() * 10; // 6-16 seconds per move
+    this.camMoveDuration = 10 + Math.random() * 15; // 10-25 seconds per move
     this.camMoveTimer = 0;
     this.camOrbitAngle = wallTime * 0.08; // sync orbit angle
   }
 
   _updateCamera(wallTime, dt, audio) {
-    const bass = audio.getBass();
     const mid = audio.getMid();
     const volume = audio.getVolume();
-    const beat = audio.isBeat();
 
     this.camMoveTimer += dt;
 
@@ -1132,28 +1126,14 @@ class Visualizer {
       this._switchCameraMode(wallTime);
     }
 
-    // Beat zoom punch
-    if (beat) {
-      this.camBeatZoom = 1.5 + bass * 1.5;
-      this.camShake.set(
-        (Math.random() - 0.5) * 0.2,
-        (Math.random() - 0.5) * 0.12,
-        (Math.random() - 0.5) * 0.2
-      );
-    }
-    this.camBeatZoom *= 0.92;
-    this.camShake.multiplyScalar(0.86);
-
-    const beatPull = this.camBeatZoom;
-
     // Compute target position and look-at based on mode
-    this.camOrbitAngle += dt * (0.06 + volume * 0.04);
+    this.camOrbitAngle += dt * (0.04 + volume * 0.02);
 
     switch (this.camMode) {
       case 'orbit': {
-        // Wide orbit around origin
-        const dist = 10 + Math.sin(wallTime * 0.03) * 3 - beatPull;
-        const height = 2 + Math.sin(wallTime * 0.05) * 2 + mid;
+        // Wide orbit — see the whole system
+        const dist = 16 + Math.sin(wallTime * 0.02) * 3;
+        const height = 3 + Math.sin(wallTime * 0.03) * 2 + mid * 0.5;
         this.camTargetPos.set(
           Math.sin(this.camOrbitAngle) * dist,
           height,
@@ -1163,78 +1143,74 @@ class Visualizer {
         break;
       }
       case 'track': {
-        // Follow a specific planet closely
+        // Follow a planet at a respectful distance
         const core = this.camTrackCore;
         if (core && core.alive) {
-          const offset = new THREE.Vector3(
-            Math.sin(this.camOrbitAngle * 2) * 2.5,
-            1.0 + Math.sin(wallTime * 0.1) * 0.8,
-            Math.cos(this.camOrbitAngle * 2) * 2.5
+          const trackDist = 3.0 + core.radius * 2.5;
+          this.camTargetPos.set(
+            core.position.x + Math.sin(this.camOrbitAngle * 0.8) * trackDist,
+            core.position.y + 1.5 + Math.sin(wallTime * 0.06) * 1.0,
+            core.position.z + Math.cos(this.camOrbitAngle * 0.8) * trackDist
           );
-          this.camTargetPos.copy(core.position).add(offset);
-          // Look slightly ahead of the planet
           this.camTargetLookAt.copy(core.position);
         } else {
-          // Fallback to orbit
-          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 8, 2, Math.cos(this.camOrbitAngle) * 8);
+          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 14, 3, Math.cos(this.camOrbitAngle) * 14);
           this.camTargetLookAt.set(0, 0, 0);
         }
         break;
       }
       case 'flyby': {
-        // Fast sweep past a planet
+        // Slow, graceful arc past a planet
         const core = this.camTrackCore;
         const t = this.camMoveTimer / this.camMoveDuration;
         if (core && core.alive) {
-          const sweepAngle = t * Math.PI * 1.5;
-          const dist = 1.8 + Math.sin(t * Math.PI) * 2 - beatPull * 0.3;
+          const sweepAngle = t * Math.PI;
+          const dist = 3.5 + core.radius * 2 + Math.sin(t * Math.PI) * 2;
           this.camTargetPos.set(
             core.position.x + Math.sin(sweepAngle) * dist,
-            core.position.y + 0.5 + Math.cos(sweepAngle * 0.7) * 1.5,
+            core.position.y + 1.0 + Math.cos(sweepAngle * 0.5) * 2,
             core.position.z + Math.cos(sweepAngle) * dist
           );
           this.camTargetLookAt.copy(core.position);
         } else {
-          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 6, 1, Math.cos(this.camOrbitAngle) * 6);
+          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 12, 2, Math.cos(this.camOrbitAngle) * 12);
           this.camTargetLookAt.set(0, 0, 0);
         }
         break;
       }
       case 'overhead': {
-        // High top-down with slow drift
-        const dist = 12 + Math.sin(wallTime * 0.02) * 3 - beatPull;
+        // High angle with slow drift
+        const dist = 18 + Math.sin(wallTime * 0.015) * 3;
         this.camTargetPos.set(
-          Math.sin(this.camOrbitAngle * 0.3) * 3,
+          Math.sin(this.camOrbitAngle * 0.2) * 4,
           dist,
-          Math.cos(this.camOrbitAngle * 0.3) * 3
+          Math.cos(this.camOrbitAngle * 0.2) * 4
         );
         this.camTargetLookAt.set(0, 0, 0);
         break;
       }
       case 'dolly': {
-        // Slow push-in toward center, then pull back
+        // Slow push-in toward a planet, then pull back
         const t = this.camMoveTimer / this.camMoveDuration;
-        const pushPull = Math.sin(t * Math.PI); // 0 -> 1 -> 0
-        const dist = 14 - pushPull * 10 - beatPull;
+        const pushPull = Math.sin(t * Math.PI);
+        const dist = 20 - pushPull * 12;
         this.camTargetPos.set(
-          Math.sin(this.camOrbitAngle * 0.5) * dist * 0.6,
-          1.5 + Math.sin(wallTime * 0.08) * 1.5,
-          Math.cos(this.camOrbitAngle * 0.5) * dist
+          Math.sin(this.camOrbitAngle * 0.4) * dist * 0.5,
+          2.0 + Math.sin(wallTime * 0.05) * 1.5,
+          Math.cos(this.camOrbitAngle * 0.4) * dist
         );
-        // Look at nearest alive core, or origin
         const nearest = this._pickRandomAliveCore();
         this.camTargetLookAt.copy(nearest ? nearest.position : new THREE.Vector3());
         break;
       }
     }
 
-    // Smooth interpolation — faster for flyby, slower for dolly
-    const lerpSpeed = this.camMode === 'flyby' ? 0.04 : this.camMode === 'dolly' ? 0.015 : 0.025;
+    // Smooth interpolation — all gentle
+    const lerpSpeed = this.camMode === 'flyby' ? 0.02 : this.camMode === 'dolly' ? 0.012 : 0.018;
     this.camPos.lerp(this.camTargetPos, lerpSpeed);
     this.camLookAt.lerp(this.camTargetLookAt, lerpSpeed);
 
-    // Apply shake
-    this.camera.position.copy(this.camPos).add(this.camShake);
+    this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camLookAt);
   }
 
