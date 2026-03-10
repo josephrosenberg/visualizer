@@ -42,6 +42,7 @@ class AudioAnalyzer {
     this.smoothMid = 0;
     this.smoothTreble = 0;
     this.smoothVolume = 0;
+    this.smoothBins = null;  // smoothed per-bin FFT data
     this.beat = false;
     this.beatHeld = 0;
     this.prevBassEnergy = 0;
@@ -95,11 +96,21 @@ class AudioAnalyzer {
     this.analyser.smoothingTimeConstant = 0.82;
     this.source.connect(this.analyser);
     this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    this.smoothBins = new Float32Array(this.analyser.frequencyBinCount);
   }
 
   update() {
     if (!this.active || !this.analyser) return;
     this.analyser.getByteFrequencyData(this.dataArray);
+
+    // Smooth per-bin frequency data
+    if (this.smoothBins) {
+      const binLerp = 0.08;
+      for (let i = 0; i < this.dataArray.length; i++) {
+        const raw = this.dataArray[i] / 255;
+        this.smoothBins[i] += (raw - this.smoothBins[i]) * binLerp;
+      }
+    }
 
     const len = this.dataArray.length;
     let bass = 0, mid = 0, treble = 0, total = 0;
@@ -119,11 +130,11 @@ class AudioAnalyzer {
     treble /= (len - midEnd);
     total /= len;
 
-    const lerp = 0.14;
-    this.smoothBass = THREE.MathUtils.lerp(this.smoothBass, bass, lerp);
-    this.smoothMid = THREE.MathUtils.lerp(this.smoothMid, mid, lerp);
-    this.smoothTreble = THREE.MathUtils.lerp(this.smoothTreble, treble, lerp);
-    this.smoothVolume = THREE.MathUtils.lerp(this.smoothVolume, total, lerp);
+    // Gentle smoothing — different rates per band so bass feels weighty
+    this.smoothBass = THREE.MathUtils.lerp(this.smoothBass, bass, 0.06);
+    this.smoothMid = THREE.MathUtils.lerp(this.smoothMid, mid, 0.08);
+    this.smoothTreble = THREE.MathUtils.lerp(this.smoothTreble, treble, 0.10);
+    this.smoothVolume = THREE.MathUtils.lerp(this.smoothVolume, total, 0.07);
 
     const bassEnergy = bass;
     const delta = bassEnergy - this.prevBassEnergy;
@@ -139,9 +150,9 @@ class AudioAnalyzer {
 
   // Get amplitude for a specific frequency bin (0..1)
   getFreqBin(bin) {
-    if (!this.active || !this.dataArray) return 0;
-    const idx = Math.min(bin, this.dataArray.length - 1);
-    return this.dataArray[idx] / 255;
+    if (!this.active || !this.smoothBins) return 0;
+    const idx = Math.min(bin, this.smoothBins.length - 1);
+    return this.smoothBins[idx];
   }
 
   getBass()   { return this.active ? this.smoothBass : 0; }
@@ -160,6 +171,7 @@ class DemoAnalyzer extends AudioAnalyzer {
     this.t = 0;
     // Fake frequency data for per-particle FFT
     this.dataArray = new Uint8Array(1024);
+    this.smoothBins = new Float32Array(1024);
   }
 
   update() {
@@ -170,13 +182,12 @@ class DemoAnalyzer extends AudioAnalyzer {
     this.smoothMid    = 0.2 + 0.3  * Math.sin(t * 1.8 + 1) * Math.sin(t * 0.6);
     this.smoothTreble = 0.15 + 0.2 * Math.sin(t * 2.5 + 2) * Math.sin(t * 0.8);
     this.smoothVolume = (this.smoothBass + this.smoothMid + this.smoothTreble) / 3;
-    this.beat = Math.sin(t * 3.2) > 0.93;
 
-    // Fill fake frequency bins
+    // Fill fake frequency bins with smooth oscillations
     for (let i = 0; i < this.dataArray.length; i++) {
       const freq = i / this.dataArray.length;
       const wave = Math.sin(t * (1 + freq * 3) + i * 0.1) * 0.5 + 0.5;
-      this.dataArray[i] = Math.floor(wave * 180 + Math.random() * 40);
+      this.smoothBins[i] += (wave - this.smoothBins[i]) * 0.08;
     }
   }
 }
@@ -362,7 +373,7 @@ class Core {
     if (!frozen) {
       const bass = audio.getBass();
       const angle = time * this.orbitSpeed + this.orbitPhase;
-      const r = this.orbitRadius * (1.0 + bass * 0.5);
+      const r = this.orbitRadius * (1.0 + bass * 0.2);
       this.position.set(
         Math.cos(angle) * r,
         Math.sin(this.orbitTilt) * Math.sin(angle * 1.3) * r * 0.4,
@@ -379,7 +390,7 @@ class Core {
     this.uniforms.uBass.value = audio.getBass();
     this.uniforms.uMid.value = audio.getMid();
     this.uniforms.uTreble.value = audio.getTreble();
-    this.uniforms.uBeat.value = audio.isBeat() ? 1.0 : 0.0;
+    this.uniforms.uBeat.value = audio.getBass();  // smooth value for potential shader use
   }
 
   destroy() {
@@ -930,10 +941,9 @@ class Visualizer {
       this._spawnCore();
       this.spawnCooldown = 2.0;
     } else if (aliveCores < this.maxCores && this.spawnCooldown <= 0) {
-      // Chance to spawn on beat, or every ~12s
-      const beatSpawn = audio.isBeat() && Math.random() < 0.08;
-      const timedSpawn = Math.random() < dt * 0.08; // ~every 12s on average
-      if (beatSpawn || timedSpawn) {
+      // Gradual spawn chance (~every 10s on average)
+      const timedSpawn = Math.random() < dt * 0.1;
+      if (timedSpawn) {
         this._spawnCore();
         this.spawnCooldown = 5.0;
       }
