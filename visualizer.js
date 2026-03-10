@@ -527,13 +527,10 @@ class MagneticParticles {
   }
 
   update(audio, dt) {
-    const bass = audio.getBass();
-    const mid = audio.getMid();
     const treble = audio.getTreble();
     const volume = audio.getVolume();
-    const beat = audio.isBeat();
 
-    const forceStrength = 0.0004 + volume * 0.002 + (beat ? 0.002 : 0);
+    const forceStrength = 0.0004 + volume * 0.003;
     const damping = 0.985;
     const maxSpeed = 0.15 + volume * 0.3;
 
@@ -624,7 +621,7 @@ class MagneticParticles {
       this.pointColors[i3 + 1] = c.g * life;
       this.pointColors[i3 + 2] = c.b * life;
 
-      this.pointSizes[i] = (1.0 + freqAmp * 3.0 + (beat ? 1.5 : 0)) * life;
+      this.pointSizes[i] = (1.0 + freqAmp * 3.0) * life;
     }
 
     // Zero out unused points
@@ -1232,8 +1229,6 @@ class Visualizer {
     const bass = this.audio.getBass();
     const volume = this.audio.getVolume();
     const treble = this.audio.getTreble();
-    const beat = this.audio.isBeat();
-
     // Update planet lifecycles (spawn/collapse)
     this._updateCoreLifecycles(dt, this.audio);
 
@@ -1241,7 +1236,7 @@ class Visualizer {
     this._updateCamera(wallTime, dt, this.audio);
 
     // Central light reacts
-    this.centralLight.intensity = 2.0 + bass * 4.0 + (beat ? 3.0 : 0);
+    this.centralLight.intensity = 2.0 + bass * 3.0 + volume * 1.5;
     const hue = 0.6 + treble * 0.1;
     this.centralLight.color.setHSL(hue, 0.5, 0.5 + volume * 0.3);
 
@@ -1260,7 +1255,7 @@ class Visualizer {
     this.starfield.rotation.y += 0.00008;
 
     // Bloom reacts to volume
-    this.bloomPass.strength = 1.3 + volume * 1.5 + (beat ? 0.6 : 0);
+    this.bloomPass.strength = 1.3 + volume * 1.8;
 
     this.composer.render();
   }
