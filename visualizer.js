@@ -266,16 +266,27 @@ const PLANET_FRAGMENT = /* glsl */ `
 `;
 
 class Core {
-  constructor(scene, index, totalCores) {
+  constructor(scene, index) {
     this.index = index;
-    this.charge = (index % 2 === 0) ? 1.0 : -0.8;
-    this.orbitRadius = 1.5 + index * 0.8;
-    this.orbitSpeed = 0.3 + index * 0.15;
-    this.orbitPhase = (index / totalCores) * Math.PI * 2;
-    this.orbitTilt = (Math.random() - 0.5) * 1.2;
+    this.scene = scene;
+    this.alive = true;
+
+    // Lifecycle state
+    this.phase = 'spawning'; // 'spawning' | 'alive' | 'collapsing' | 'dead'
+    this.phaseTime = 0;
+    this.spawnDuration = 1.5 + Math.random() * 1.0;
+    this.lifeDuration = 15 + Math.random() * 25; // 15-40 seconds alive
+    this.collapseDuration = 1.2 + Math.random() * 0.8;
+    this.scaleT = 0; // 0..1 animated scale factor
+
+    this.charge = (Math.random() > 0.5) ? 1.0 : -0.8;
+    this.orbitRadius = 1.2 + Math.random() * 2.5;
+    this.orbitSpeed = 0.15 + Math.random() * 0.35;
+    this.orbitPhase = Math.random() * Math.PI * 2;
+    this.orbitTilt = (Math.random() - 0.5) * 1.4;
     this.position = new THREE.Vector3();
     this.velocity = new THREE.Vector3();
-    this.radius = 0.4 + Math.random() * 0.3;
+    this.radius = 0.3 + Math.random() * 0.4;
 
     const geo = new THREE.IcosahedronGeometry(this.radius, 3);
     this.geometry = geo;
@@ -302,10 +313,54 @@ class Core {
 
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.castShadow = true;
+    this.mesh.scale.setScalar(0.001); // start invisible
     scene.add(this.mesh);
+
+    // Set initial position so particles can find it immediately
+    const angle = this.orbitPhase;
+    this.position.set(
+      Math.cos(angle) * this.orbitRadius,
+      Math.sin(this.orbitTilt) * Math.sin(angle * 1.3) * this.orbitRadius * 0.4,
+      Math.sin(angle) * this.orbitRadius
+    );
+    this.mesh.position.copy(this.position);
   }
 
-  update(time, audio, frozen) {
+  update(time, dt, audio, frozen) {
+    // Lifecycle
+    this.phaseTime += dt;
+
+    if (this.phase === 'spawning') {
+      this.scaleT = Math.min(1, this.phaseTime / this.spawnDuration);
+      // Elastic ease-out
+      const t = this.scaleT;
+      this.scaleT = t < 1 ? 1 - Math.pow(1 - t, 3) * Math.cos(t * Math.PI * 0.5) : 1;
+      if (this.phaseTime >= this.spawnDuration) {
+        this.phase = 'alive';
+        this.phaseTime = 0;
+        this.scaleT = 1;
+      }
+    } else if (this.phase === 'alive') {
+      this.scaleT = 1;
+      if (this.phaseTime >= this.lifeDuration) {
+        this.phase = 'collapsing';
+        this.phaseTime = 0;
+      }
+    } else if (this.phase === 'collapsing') {
+      const t = Math.min(1, this.phaseTime / this.collapseDuration);
+      // Accelerating collapse
+      this.scaleT = 1 - t * t * t;
+      if (this.phaseTime >= this.collapseDuration) {
+        this.phase = 'dead';
+        this.alive = false;
+        this.mesh.visible = false;
+      }
+    }
+
+    if (!this.alive) return;
+
+    this.mesh.scale.setScalar(Math.max(0.001, this.scaleT));
+
     if (!frozen) {
       const bass = audio.getBass();
       const angle = time * this.orbitSpeed + this.orbitPhase;
@@ -329,8 +384,14 @@ class Core {
     this.uniforms.uBeat.value = audio.isBeat() ? 1.0 : 0.0;
   }
 
+  destroy() {
+    this.scene.remove(this.mesh);
+    this.geometry.dispose();
+    this.material.dispose();
+  }
+
   applyMode(mode, palette) {
-    this.mesh.visible = mode.coreVisible;
+    this.mesh.visible = mode.coreVisible && this.alive;
     this.material.wireframe = mode.wireframe;
     this.uniforms.uMetalness.value = mode.metalness;
     this.uniforms.uRoughness.value = mode.roughness;
@@ -424,6 +485,10 @@ class MagneticParticles {
 
     this.innerColor = new THREE.Color(0x6699ff);
     this.outerColor = new THREE.Color(0x2244aa);
+    // Pooled color objects to avoid GC pressure in hot loops
+    this._tmpColorA = new THREE.Color();
+    this._tmpColorB = new THREE.Color();
+    this._tmpColorParticle = new THREE.Color();
   }
 
   _initParticle(i) {
@@ -556,7 +621,7 @@ class MagneticParticles {
 
       // Color by charge and frequency
       const t = freqAmp;
-      const c = new THREE.Color().lerpColors(this.outerColor, this.innerColor, t);
+      const c = this._tmpColorParticle.lerpColors(this.outerColor, this.innerColor, t);
       this.pointColors[i3]     = c.r * life;
       this.pointColors[i3 + 1] = c.g * life;
       this.pointColors[i3 + 2] = c.b * life;
@@ -612,8 +677,8 @@ class MagneticParticles {
         this.trailPositions[vB + 2] = trail[j3 + 5];
 
         // Color fades along trail
-        const cA = new THREE.Color().lerpColors(this.outerColor, this.innerColor, alphaA);
-        const cB = new THREE.Color().lerpColors(this.outerColor, this.innerColor, alphaB);
+        const cA = this._tmpColorA.lerpColors(this.outerColor, this.innerColor, alphaA);
+        const cB = this._tmpColorB.lerpColors(this.outerColor, this.innerColor, alphaB);
 
         this.trailColors[vA]     = cA.r * alphaA;
         this.trailColors[vA + 1] = cA.g * alphaA;
@@ -770,16 +835,18 @@ class Visualizer {
     this.particleCount = 1500;
     this.clock = new THREE.Clock();
 
-    // Camera drama state
-    this.camOrbitSpeed = 0.08;         // base orbit speed
-    this.camTargetOrbitSpeed = 0.08;
-    this.camHeightOffset = 0;          // smooth height variation
-    this.camTargetHeight = 0;
-    this.camDistOffset = 10;           // camera distance (absolute)
-    this.camTargetDist = 10;
-    this.camShake = new THREE.Vector3(); // beat shake
-    this.camDramaTimer = 0;            // timer for periodic drama changes
-    this.camDramaPhase = 0;            // which drama "move" we're in
+    // Camera state
+    this.camPos = new THREE.Vector3(0, 3, 12);
+    this.camTargetPos = new THREE.Vector3(0, 3, 12);
+    this.camLookAt = new THREE.Vector3(0, 0, 0);
+    this.camTargetLookAt = new THREE.Vector3(0, 0, 0);
+    this.camShake = new THREE.Vector3();
+    this.camMoveTimer = 0;
+    this.camMoveDuration = 8;
+    this.camMode = 'orbit';  // 'orbit' | 'track' | 'flyby' | 'overhead' | 'dolly'
+    this.camTrackCore = null;
+    this.camOrbitAngle = 0;
+    this.camBeatZoom = 0; // transient zoom punch on beats
 
     this._initRenderer();
     this._initScene();
@@ -828,10 +895,55 @@ class Visualizer {
   }
 
   _initCores() {
-    const numCores = 3;
-    for (let i = 0; i < numCores; i++) {
-      const core = new Core(this.scene, i, numCores);
-      this.cores.push(core);
+    this.coreIdCounter = 0;
+    this.minCores = 2;
+    this.maxCores = 5;
+    this.spawnCooldown = 0;
+    // Spawn initial planets
+    for (let i = 0; i < 3; i++) {
+      this._spawnCore();
+    }
+  }
+
+  _spawnCore() {
+    const core = new Core(this.scene, this.coreIdCounter++);
+    this.cores.push(core);
+    this._applyModeToCore(core);
+    return core;
+  }
+
+  _applyModeToCore(core) {
+    const mode = MODES[this.modeIndex];
+    const palette = PALETTES[this.paletteIndex];
+    core.applyMode(mode, palette);
+  }
+
+  _updateCoreLifecycles(dt, audio) {
+    this.spawnCooldown = Math.max(0, this.spawnCooldown - dt);
+
+    // Remove dead cores
+    for (let i = this.cores.length - 1; i >= 0; i--) {
+      if (!this.cores[i].alive && this.cores[i].phase === 'dead') {
+        this.cores[i].destroy();
+        this.cores.splice(i, 1);
+      }
+    }
+
+    // Count alive (not dead) cores
+    const aliveCores = this.cores.filter(c => c.phase !== 'dead').length;
+
+    // Spawn new ones if below minimum, or randomly on beats
+    if (aliveCores < this.minCores && this.spawnCooldown <= 0) {
+      this._spawnCore();
+      this.spawnCooldown = 2.0;
+    } else if (aliveCores < this.maxCores && this.spawnCooldown <= 0) {
+      // Chance to spawn on beat, or every ~12s
+      const beatSpawn = audio.isBeat() && Math.random() < 0.08;
+      const timedSpawn = Math.random() < dt * 0.08; // ~every 12s on average
+      if (beatSpawn || timedSpawn) {
+        this._spawnCore();
+        this.spawnCooldown = 5.0;
+      }
     }
   }
 
@@ -861,7 +973,7 @@ class Visualizer {
     const palette = PALETTES[this.paletteIndex];
 
     for (const core of this.cores) {
-      core.applyMode(mode, palette);
+      this._applyModeToCore(core);
     }
     this.particles.applyMode(mode, palette);
     this.nebula.applyPalette(palette);
@@ -988,6 +1100,144 @@ class Visualizer {
     this._animate();
   }
 
+  _pickRandomAliveCore() {
+    const alive = this.cores.filter(c => c.alive);
+    return alive.length > 0 ? alive[Math.floor(Math.random() * alive.length)] : null;
+  }
+
+  _switchCameraMode(wallTime) {
+    const modes = ['orbit', 'track', 'flyby', 'overhead', 'dolly', 'orbit', 'track'];
+    this.camMode = modes[Math.floor(Math.random() * modes.length)];
+    this.camTrackCore = this._pickRandomAliveCore();
+    this.camMoveDuration = 6 + Math.random() * 10; // 6-16 seconds per move
+    this.camMoveTimer = 0;
+    this.camOrbitAngle = wallTime * 0.08; // sync orbit angle
+  }
+
+  _updateCamera(wallTime, dt, audio) {
+    const bass = audio.getBass();
+    const mid = audio.getMid();
+    const volume = audio.getVolume();
+    const beat = audio.isBeat();
+
+    this.camMoveTimer += dt;
+
+    // Switch camera mode periodically
+    if (this.camMoveTimer >= this.camMoveDuration) {
+      this._switchCameraMode(wallTime);
+    }
+
+    // If tracking a dead core, switch early
+    if (this.camTrackCore && !this.camTrackCore.alive) {
+      this._switchCameraMode(wallTime);
+    }
+
+    // Beat zoom punch
+    if (beat) {
+      this.camBeatZoom = 1.5 + bass * 1.5;
+      this.camShake.set(
+        (Math.random() - 0.5) * 0.2,
+        (Math.random() - 0.5) * 0.12,
+        (Math.random() - 0.5) * 0.2
+      );
+    }
+    this.camBeatZoom *= 0.92;
+    this.camShake.multiplyScalar(0.86);
+
+    const beatPull = this.camBeatZoom;
+
+    // Compute target position and look-at based on mode
+    this.camOrbitAngle += dt * (0.06 + volume * 0.04);
+
+    switch (this.camMode) {
+      case 'orbit': {
+        // Wide orbit around origin
+        const dist = 10 + Math.sin(wallTime * 0.03) * 3 - beatPull;
+        const height = 2 + Math.sin(wallTime * 0.05) * 2 + mid;
+        this.camTargetPos.set(
+          Math.sin(this.camOrbitAngle) * dist,
+          height,
+          Math.cos(this.camOrbitAngle) * dist
+        );
+        this.camTargetLookAt.set(0, 0, 0);
+        break;
+      }
+      case 'track': {
+        // Follow a specific planet closely
+        const core = this.camTrackCore;
+        if (core && core.alive) {
+          const offset = new THREE.Vector3(
+            Math.sin(this.camOrbitAngle * 2) * 2.5,
+            1.0 + Math.sin(wallTime * 0.1) * 0.8,
+            Math.cos(this.camOrbitAngle * 2) * 2.5
+          );
+          this.camTargetPos.copy(core.position).add(offset);
+          // Look slightly ahead of the planet
+          this.camTargetLookAt.copy(core.position);
+        } else {
+          // Fallback to orbit
+          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 8, 2, Math.cos(this.camOrbitAngle) * 8);
+          this.camTargetLookAt.set(0, 0, 0);
+        }
+        break;
+      }
+      case 'flyby': {
+        // Fast sweep past a planet
+        const core = this.camTrackCore;
+        const t = this.camMoveTimer / this.camMoveDuration;
+        if (core && core.alive) {
+          const sweepAngle = t * Math.PI * 1.5;
+          const dist = 1.8 + Math.sin(t * Math.PI) * 2 - beatPull * 0.3;
+          this.camTargetPos.set(
+            core.position.x + Math.sin(sweepAngle) * dist,
+            core.position.y + 0.5 + Math.cos(sweepAngle * 0.7) * 1.5,
+            core.position.z + Math.cos(sweepAngle) * dist
+          );
+          this.camTargetLookAt.copy(core.position);
+        } else {
+          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 6, 1, Math.cos(this.camOrbitAngle) * 6);
+          this.camTargetLookAt.set(0, 0, 0);
+        }
+        break;
+      }
+      case 'overhead': {
+        // High top-down with slow drift
+        const dist = 12 + Math.sin(wallTime * 0.02) * 3 - beatPull;
+        this.camTargetPos.set(
+          Math.sin(this.camOrbitAngle * 0.3) * 3,
+          dist,
+          Math.cos(this.camOrbitAngle * 0.3) * 3
+        );
+        this.camTargetLookAt.set(0, 0, 0);
+        break;
+      }
+      case 'dolly': {
+        // Slow push-in toward center, then pull back
+        const t = this.camMoveTimer / this.camMoveDuration;
+        const pushPull = Math.sin(t * Math.PI); // 0 -> 1 -> 0
+        const dist = 14 - pushPull * 10 - beatPull;
+        this.camTargetPos.set(
+          Math.sin(this.camOrbitAngle * 0.5) * dist * 0.6,
+          1.5 + Math.sin(wallTime * 0.08) * 1.5,
+          Math.cos(this.camOrbitAngle * 0.5) * dist
+        );
+        // Look at nearest alive core, or origin
+        const nearest = this._pickRandomAliveCore();
+        this.camTargetLookAt.copy(nearest ? nearest.position : new THREE.Vector3());
+        break;
+      }
+    }
+
+    // Smooth interpolation — faster for flyby, slower for dolly
+    const lerpSpeed = this.camMode === 'flyby' ? 0.04 : this.camMode === 'dolly' ? 0.015 : 0.025;
+    this.camPos.lerp(this.camTargetPos, lerpSpeed);
+    this.camLookAt.lerp(this.camTargetLookAt, lerpSpeed);
+
+    // Apply shake
+    this.camera.position.copy(this.camPos).add(this.camShake);
+    this.camera.lookAt(this.camLookAt);
+  }
+
   _animate() {
     requestAnimationFrame(() => this._animate());
 
@@ -1004,83 +1254,15 @@ class Visualizer {
     }
 
     const bass = this.audio.getBass();
-    const mid = this.audio.getMid();
-    const treble = this.audio.getTreble();
     const volume = this.audio.getVolume();
+    const treble = this.audio.getTreble();
     const beat = this.audio.isBeat();
 
-    // Camera drama: varied movement with periodic changes
-    this.camDramaTimer += dt;
+    // Update planet lifecycles (spawn/collapse)
+    this._updateCoreLifecycles(dt, this.audio);
 
-    // Every 8-16 seconds, pick a new camera "move"
-    if (this.camDramaTimer > 8 + this.camDramaPhase * 2) {
-      this.camDramaTimer = 0;
-      this.camDramaPhase = (this.camDramaPhase + 1) % 7;
-
-      switch (this.camDramaPhase) {
-        case 0: // Medium orbit — default establishing view
-          this.camTargetOrbitSpeed = 0.08;
-          this.camTargetHeight = 0;
-          this.camTargetDist = 10;
-          break;
-        case 1: // Close fly-by — amongst the planets
-          this.camTargetOrbitSpeed = 0.06;
-          this.camTargetHeight = -0.3;
-          this.camTargetDist = 4.0;
-          break;
-        case 2: // Wide pull-back, high angle — see the whole system
-          this.camTargetOrbitSpeed = 0.05;
-          this.camTargetHeight = 3.5;
-          this.camTargetDist = 15.0;
-          break;
-        case 3: // Tight low orbit — skimming planet surfaces
-          this.camTargetOrbitSpeed = 0.10;
-          this.camTargetHeight = -1.0;
-          this.camTargetDist = 3.0;
-          break;
-        case 4: // Slow drift, medium distance
-          this.camTargetOrbitSpeed = 0.04;
-          this.camTargetHeight = 1.0;
-          this.camTargetDist = 8.0;
-          break;
-        case 5: // Very close pass — planet fills the view
-          this.camTargetOrbitSpeed = 0.07;
-          this.camTargetHeight = 0.2;
-          this.camTargetDist = 2.5;
-          break;
-        case 6: // Fast sweep, level — cinematic fly-through
-          this.camTargetOrbitSpeed = 0.14;
-          this.camTargetHeight = -0.5;
-          this.camTargetDist = 5.5;
-          break;
-      }
-    }
-
-    // Smooth lerp toward targets (slow transitions = not jarring)
-    const camLerp = 0.015;
-    this.camOrbitSpeed = THREE.MathUtils.lerp(this.camOrbitSpeed, this.camTargetOrbitSpeed, camLerp);
-    this.camHeightOffset = THREE.MathUtils.lerp(this.camHeightOffset, this.camTargetHeight, camLerp);
-    this.camDistOffset = THREE.MathUtils.lerp(this.camDistOffset, this.camTargetDist, camLerp);
-
-    // Beat shake: small impulse that decays quickly
-    if (beat) {
-      this.camShake.set(
-        (Math.random() - 0.5) * 0.15,
-        (Math.random() - 0.5) * 0.10,
-        (Math.random() - 0.5) * 0.15
-      );
-    }
-    this.camShake.multiplyScalar(0.88); // decay
-
-    const camTheta = wallTime * this.camOrbitSpeed;
-    const camPhi = 0.3 + Math.sin(wallTime * 0.05) * 0.15 + this.camHeightOffset * 0.06;
-    const camDist = this.camDistOffset - bass * 2.0;
-    this.camera.position.set(
-      Math.sin(camTheta) * Math.cos(camPhi) * camDist + this.camShake.x,
-      Math.sin(camPhi) * camDist * 0.4 + 1.0 + mid * 0.5 + this.camHeightOffset * 0.3 + this.camShake.y,
-      Math.cos(camTheta) * Math.cos(camPhi) * camDist + this.camShake.z
-    );
-    this.camera.lookAt(0, 0, 0);
+    // Camera
+    this._updateCamera(wallTime, dt, this.audio);
 
     // Central light reacts
     this.centralLight.intensity = 2.0 + bass * 4.0 + (beat ? 3.0 : 0);
@@ -1089,7 +1271,7 @@ class Visualizer {
 
     // Update cores
     for (const core of this.cores) {
-      core.update(simTime, this.audio, this.frozen);
+      core.update(simTime, dt, this.audio, this.frozen);
     }
 
     // Update magnetic particles
