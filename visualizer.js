@@ -105,7 +105,7 @@ class AudioAnalyzer {
 
     // Smooth per-bin frequency data
     if (this.smoothBins) {
-      const binLerp = 0.08;
+      const binLerp = 0.12;
       for (let i = 0; i < this.dataArray.length; i++) {
         const raw = this.dataArray[i] / 255;
         this.smoothBins[i] += (raw - this.smoothBins[i]) * binLerp;
@@ -130,11 +130,15 @@ class AudioAnalyzer {
     treble /= (len - midEnd);
     total /= len;
 
-    // Gentle smoothing — different rates per band so bass feels weighty
-    this.smoothBass = THREE.MathUtils.lerp(this.smoothBass, bass, 0.06);
-    this.smoothMid = THREE.MathUtils.lerp(this.smoothMid, mid, 0.08);
-    this.smoothTreble = THREE.MathUtils.lerp(this.smoothTreble, treble, 0.10);
-    this.smoothVolume = THREE.MathUtils.lerp(this.smoothVolume, total, 0.07);
+    // Asymmetric smoothing: rise faster than decay so hits land but falloff is gentle
+    const bassUp = bass > this.smoothBass ? 0.12 : 0.05;
+    const midUp  = mid  > this.smoothMid  ? 0.14 : 0.06;
+    const trebUp = treble > this.smoothTreble ? 0.16 : 0.07;
+    const volUp  = total > this.smoothVolume  ? 0.12 : 0.05;
+    this.smoothBass = THREE.MathUtils.lerp(this.smoothBass, bass, bassUp);
+    this.smoothMid = THREE.MathUtils.lerp(this.smoothMid, mid, midUp);
+    this.smoothTreble = THREE.MathUtils.lerp(this.smoothTreble, treble, trebUp);
+    this.smoothVolume = THREE.MathUtils.lerp(this.smoothVolume, total, volUp);
 
     const bassEnergy = bass;
     const delta = bassEnergy - this.prevBassEnergy;
@@ -373,7 +377,7 @@ class Core {
     if (!frozen) {
       const bass = audio.getBass();
       const angle = time * this.orbitSpeed + this.orbitPhase;
-      const r = this.orbitRadius * (1.0 + bass * 0.2);
+      const r = this.orbitRadius * (1.0 + bass * 0.35);
       this.position.set(
         Math.cos(angle) * r,
         Math.sin(this.orbitTilt) * Math.sin(angle * 1.3) * r * 0.4,
@@ -1246,7 +1250,7 @@ class Visualizer {
     this._updateCamera(wallTime, dt, this.audio);
 
     // Central light reacts
-    this.centralLight.intensity = 2.0 + bass * 3.0 + volume * 1.5;
+    this.centralLight.intensity = 2.5 + bass * 4.0 + volume * 2.0;
     const hue = 0.6 + treble * 0.1;
     this.centralLight.color.setHSL(hue, 0.5, 0.5 + volume * 0.3);
 
@@ -1265,7 +1269,7 @@ class Visualizer {
     this.starfield.rotation.y += 0.00008;
 
     // Bloom reacts to volume
-    this.bloomPass.strength = 1.3 + volume * 1.8;
+    this.bloomPass.strength = 1.5 + volume * 2.0;
 
     this.composer.render();
   }
