@@ -279,10 +279,11 @@ const PLANET_FRAGMENT = /* glsl */ `
 `;
 
 class Core {
-  constructor(scene, index) {
+  constructor(scene, index, role = 'satellite') {
     this.index = index;
     this.scene = scene;
     this.alive = true;
+    this.role = role;
 
     // Lifecycle state
     this.phase = 'spawning'; // 'spawning' | 'alive' | 'collapsing' | 'dead'
@@ -293,13 +294,20 @@ class Core {
     this.scaleT = 0; // 0..1 animated scale factor
 
     this.charge = (Math.random() > 0.5) ? 1.0 : -0.8;
-    this.orbitRadius = 2.5 + Math.random() * 3.5;
-    this.orbitSpeed = 0.06 + Math.random() * 0.12;
     this.orbitPhase = Math.random() * Math.PI * 2;
     this.orbitTilt = (Math.random() - 0.5) * 0.8;
     this.position = new THREE.Vector3();
     this.velocity = new THREE.Vector3();
-    this.radius = 0.8 + Math.random() * 0.7;
+
+    if (role === 'primary') {
+      this.radius = 2.0 + Math.random() * 0.5;
+      this.orbitRadius = 0.5;
+      this.orbitSpeed = 0.01;
+    } else {
+      this.radius = 0.6 + Math.random() * 0.6;
+      this.orbitRadius = 4.0 + Math.random() * 3.5;
+      this.orbitSpeed = 0.06 + Math.random() * 0.12;
+    }
 
     const geo = new THREE.IcosahedronGeometry(this.radius, 4);
     this.geometry = geo;
@@ -878,10 +886,10 @@ class Visualizer {
   _initScene() {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x000008);
-    this.scene.fog = new THREE.FogExp2(0x000008, 0.008);
+    this.scene.fog = new THREE.FogExp2(0x000008, 0.006);
 
-    this.camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 400);
-    this.camera.position.set(0, 4, 16);
+    this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 400);
+    this.camera.position.set(0, 3, 10);
     this.camera.lookAt(0, 0, 0);
 
     // Subtle ambient
@@ -907,14 +915,14 @@ class Visualizer {
     this.minCores = 2;
     this.maxCores = 5;
     this.spawnCooldown = 0;
-    // Spawn initial planets
-    for (let i = 0; i < 3; i++) {
-      this._spawnCore();
-    }
+    // Spawn initial planets: 1 primary + 2 satellites
+    this._spawnCore('primary');
+    this._spawnCore('satellite');
+    this._spawnCore('satellite');
   }
 
-  _spawnCore() {
-    const core = new Core(this.scene, this.coreIdCounter++);
+  _spawnCore(role = 'satellite') {
+    const core = new Core(this.scene, this.coreIdCounter++, role);
     this.cores.push(core);
     this._applyModeToCore(core);
     return core;
@@ -941,14 +949,15 @@ class Visualizer {
     const aliveCores = this.cores.filter(c => c.phase !== 'dead').length;
 
     // Spawn new ones if below minimum, or randomly on beats
+    const hasPrimary = this.cores.some(c => c.role === 'primary' && c.phase !== 'dead');
     if (aliveCores < this.minCores && this.spawnCooldown <= 0) {
-      this._spawnCore();
+      this._spawnCore(hasPrimary ? 'satellite' : 'primary');
       this.spawnCooldown = 2.0;
     } else if (aliveCores < this.maxCores && this.spawnCooldown <= 0) {
       // Gradual spawn chance (~every 10s on average)
       const timedSpawn = Math.random() < dt * 0.1;
       if (timedSpawn) {
-        this._spawnCore();
+        this._spawnCore(hasPrimary ? 'satellite' : 'primary');
         this.spawnCooldown = 5.0;
       }
     }
@@ -1112,10 +1121,15 @@ class Visualizer {
     return alive.length > 0 ? alive[Math.floor(Math.random() * alive.length)] : null;
   }
 
+  _pickPrimaryCore() {
+    const primary = this.cores.find(c => c.role === 'primary' && c.alive);
+    return primary || this._pickRandomAliveCore();
+  }
+
   _switchCameraMode(wallTime) {
-    const modes = ['orbit', 'track', 'flyby', 'overhead', 'dolly', 'orbit', 'track'];
+    const modes = ['track', 'track', 'closePrimary', 'closePrimary', 'flyby', 'flyby', 'orbit', 'dolly'];
     this.camMode = modes[Math.floor(Math.random() * modes.length)];
-    this.camTrackCore = this._pickRandomAliveCore();
+    this.camTrackCore = this.camMode === 'closePrimary' ? this._pickPrimaryCore() : this._pickRandomAliveCore();
     this.camMoveDuration = 10 + Math.random() * 15; // 10-25 seconds per move
     this.camMoveTimer = 0;
     this.camOrbitAngle = wallTime * 0.08; // sync orbit angle
@@ -1143,7 +1157,7 @@ class Visualizer {
     switch (this.camMode) {
       case 'orbit': {
         // Wide orbit — see the whole system
-        const dist = 16 + Math.sin(wallTime * 0.02) * 3;
+        const dist = 9 + Math.sin(wallTime * 0.02) * 2;
         const height = 3 + Math.sin(wallTime * 0.03) * 2 + mid * 0.5;
         this.camTargetPos.set(
           Math.sin(this.camOrbitAngle) * dist,
@@ -1154,18 +1168,36 @@ class Visualizer {
         break;
       }
       case 'track': {
-        // Follow a planet at a respectful distance
+        // Follow a planet closely
         const core = this.camTrackCore;
         if (core && core.alive) {
-          const trackDist = 3.0 + core.radius * 2.5;
+          const trackDist = core.radius * 1.8 + 1.0;
           this.camTargetPos.set(
             core.position.x + Math.sin(this.camOrbitAngle * 0.8) * trackDist,
-            core.position.y + 1.5 + Math.sin(wallTime * 0.06) * 1.0,
+            core.position.y + 1.0 + Math.sin(wallTime * 0.06) * 0.8,
             core.position.z + Math.cos(this.camOrbitAngle * 0.8) * trackDist
           );
           this.camTargetLookAt.copy(core.position);
         } else {
-          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 14, 3, Math.cos(this.camOrbitAngle) * 14);
+          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 9, 3, Math.cos(this.camOrbitAngle) * 9);
+          this.camTargetLookAt.set(0, 0, 0);
+        }
+        break;
+      }
+      case 'closePrimary': {
+        // Signature "magnetosphere shot" — primary fills the frame
+        const core = this.camTrackCore;
+        if (core && core.alive) {
+          const dist = core.radius * 2.0;
+          const bobHeight = Math.sin(wallTime * 0.04) * 0.5;
+          this.camTargetPos.set(
+            core.position.x + Math.sin(this.camOrbitAngle * 0.3) * dist,
+            core.position.y + bobHeight + 0.5,
+            core.position.z + Math.cos(this.camOrbitAngle * 0.3) * dist
+          );
+          this.camTargetLookAt.copy(core.position);
+        } else {
+          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 6, 2, Math.cos(this.camOrbitAngle) * 6);
           this.camTargetLookAt.set(0, 0, 0);
         }
         break;
@@ -1176,22 +1208,22 @@ class Visualizer {
         const t = this.camMoveTimer / this.camMoveDuration;
         if (core && core.alive) {
           const sweepAngle = t * Math.PI;
-          const dist = 3.5 + core.radius * 2 + Math.sin(t * Math.PI) * 2;
+          const dist = core.radius * 1.5 + 0.5 + Math.sin(t * Math.PI) * 1.5;
           this.camTargetPos.set(
             core.position.x + Math.sin(sweepAngle) * dist,
-            core.position.y + 1.0 + Math.cos(sweepAngle * 0.5) * 2,
+            core.position.y + 0.8 + Math.cos(sweepAngle * 0.5) * 1.5,
             core.position.z + Math.cos(sweepAngle) * dist
           );
           this.camTargetLookAt.copy(core.position);
         } else {
-          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 12, 2, Math.cos(this.camOrbitAngle) * 12);
+          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 8, 2, Math.cos(this.camOrbitAngle) * 8);
           this.camTargetLookAt.set(0, 0, 0);
         }
         break;
       }
       case 'overhead': {
         // High angle with slow drift
-        const dist = 18 + Math.sin(wallTime * 0.015) * 3;
+        const dist = 10 + Math.sin(wallTime * 0.015) * 2;
         this.camTargetPos.set(
           Math.sin(this.camOrbitAngle * 0.2) * 4,
           dist,
@@ -1204,7 +1236,7 @@ class Visualizer {
         // Slow push-in toward a planet, then pull back
         const t = this.camMoveTimer / this.camMoveDuration;
         const pushPull = Math.sin(t * Math.PI);
-        const dist = 20 - pushPull * 12;
+        const dist = 12 - pushPull * 8;
         this.camTargetPos.set(
           Math.sin(this.camOrbitAngle * 0.4) * dist * 0.5,
           2.0 + Math.sin(wallTime * 0.05) * 1.5,
@@ -1217,7 +1249,7 @@ class Visualizer {
     }
 
     // Smooth interpolation — all gentle
-    const lerpSpeed = this.camMode === 'flyby' ? 0.02 : this.camMode === 'dolly' ? 0.012 : 0.018;
+    const lerpSpeed = this.camMode === 'flyby' ? 0.02 : this.camMode === 'dolly' ? 0.012 : this.camMode === 'closePrimary' ? 0.015 : 0.018;
     this.camPos.lerp(this.camTargetPos, lerpSpeed);
     this.camLookAt.lerp(this.camTargetLookAt, lerpSpeed);
 
