@@ -196,6 +196,13 @@ class DemoAnalyzer extends AudioAnalyzer {
   }
 }
 
+// ─── Physics constants ───────────────────────────────────────────────────────
+
+// Gravitational constant for the inter-core n-body sim. Tuned for visual
+// orbits in the 10–30s period range at our scene scale (radii 1–3, separations
+// 3–8). Audio bass scales this up to ~1.4× for "system breathes" on hits.
+const PHYSICS_G = 1.4;
+
 // ─── Core (Planet with shader-based surface) ─────────────────────────────────
 
 const PLANET_VERTEX = /* glsl */ `
@@ -234,80 +241,94 @@ const PLANET_FRAGMENT = /* glsl */ `
   varying vec3 vWorldPos;
   varying vec3 vViewDir;
 
+  // Hash-based 3D value noise — cheap, good enough for atmospheric texture.
+  float hash3(vec3 p) {
+    p = fract(p * vec3(443.897, 441.423, 437.195));
+    p += dot(p, p.yzx + 19.19);
+    return fract((p.x + p.y) * p.z);
+  }
+  float vnoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash3(i);
+    float n100 = hash3(i + vec3(1.0, 0.0, 0.0));
+    float n010 = hash3(i + vec3(0.0, 1.0, 0.0));
+    float n110 = hash3(i + vec3(1.0, 1.0, 0.0));
+    float n001 = hash3(i + vec3(0.0, 0.0, 1.0));
+    float n101 = hash3(i + vec3(1.0, 0.0, 1.0));
+    float n011 = hash3(i + vec3(0.0, 1.0, 1.0));
+    float n111 = hash3(i + vec3(1.0, 1.0, 1.0));
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+  }
+
   void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(vViewDir);
+    float NdotV = max(dot(N, V), 0.0);
 
-    // Fresnel (Schlick approximation)
-    float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+    // Hodgin-style nebula: a hot concentrated nucleus stands in stark contrast
+    // to a darker body, with a soft halo just inside the silhouette.
+    float nucleus  = pow(NdotV, 14.0);    // very tight white-hot center point
+    float halo     = pow(NdotV, 4.0);     // medium inner glow around nucleus
+    float corona   = pow(NdotV, 1.6);     // wider body falloff
+    float rim      = pow(1.0 - NdotV, 3.0); // narrow atmospheric edge
 
-    // Simple lighting from center (point light at origin)
-    vec3 lightDir = normalize(-vWorldPos);
-    float NdotL = max(dot(N, lightDir), 0.0);
+    // Animated atmospheric texture — drifting cloud-like patterns.
+    vec3 p = vWorldPos * 0.55;
+    float t = uTime * 0.15;
+    float n = vnoise(p + vec3(t, 0.0, 0.0)) * 0.6
+            + vnoise(p * 2.1 - vec3(0.0, t * 1.3, 0.0)) * 0.3
+            + vnoise(p * 4.3 + vec3(0.0, 0.0, t * 0.7)) * 0.1;
+    float surface = smoothstep(0.25, 0.85, n);
 
-    // Specular (Blinn-Phong)
-    vec3 H = normalize(lightDir + V);
-    float NdotH = max(dot(N, H), 0.0);
-    float specPower = mix(16.0, 128.0, 1.0 - uRoughness);
-    float spec = pow(NdotH, specPower) * mix(0.3, 1.0, uMetalness);
+    // Audio-reactive pulse.
+    float pulse = 1.0 + uBass * 0.5 + uMid * 0.2;
+    float sparkle = uTreble * 0.5;
 
-    vec3 baseColor = uColorCore;
+    // Color stack: white-hot nucleus → palette inner glow → darker body → halo edge.
+    vec3 nucleusCol = mix(uColorInner, vec3(1.0), 0.8);
+    vec3 haloCol    = uColorInner;
+    vec3 bodyCol    = mix(uColorOuter * 0.4, uColorCore * 0.7, surface);
+    vec3 rimCol     = uColorOuter;
 
-    // Gentle volume-based emissive glow
-    float emissiveStrength = uBass * 0.15 + uMid * 0.1;
-    vec3 emissive = uColorInner * emissiveStrength;
-
-    // Combine
-    vec3 diffuse = baseColor * NdotL * 0.8;
-    vec3 specColor = mix(vec3(0.04), baseColor, uMetalness);
-    vec3 specular = specColor * spec;
-
-    // Fresnel rim glow — reacts to bass
-    vec3 rimColor = mix(uColorInner, uColorOuter, 0.5);
-    vec3 rim = rimColor * fresnel * (0.6 + uBass * 0.8);
-
-    // Ambient
-    vec3 ambient = baseColor * 0.08;
-
-    vec3 color = ambient + diffuse + specular + rim + emissive;
-
-    // Tone mapping (simple Reinhard)
-    color = color / (color + vec3(1.0));
+    // Body is intentionally dark so the nucleus and rim do the heavy visual lifting.
+    vec3 color = bodyCol * (0.04 + corona * 0.18);
+    color += haloCol * halo * pulse * 0.6;
+    color += nucleusCol * nucleus * pulse * 3.5;
+    color += rimCol * rim * pulse * 0.9;
+    color += uColorInner * sparkle * surface * 0.4;
 
     gl_FragColor = vec4(color, 1.0);
   }
 `;
 
 class Core {
-  constructor(scene, index, role = 'satellite') {
+  // params: { role, mass, charge, radius, position: Vector3, velocity: Vector3 }
+  constructor(scene, index, params) {
     this.index = index;
     this.scene = scene;
     this.alive = true;
-    this.role = role;
+
+    this.role = params.role;
+    this.mass = params.mass;
+    this.charge = params.charge;
+    this.radius = params.radius;
+    this.position = params.position.clone();
+    this.velocity = params.velocity.clone();
+    this.acceleration = new THREE.Vector3();
 
     // Lifecycle state
     this.phase = 'spawning'; // 'spawning' | 'alive' | 'collapsing' | 'dead'
     this.phaseTime = 0;
-    this.spawnDuration = 3.0 + Math.random() * 2.0;
-    this.lifeDuration = 30 + Math.random() * 40; // 30-70 seconds alive
-    this.collapseDuration = 3.0 + Math.random() * 2.0;
-    this.scaleT = 0; // 0..1 animated scale factor
-
-    this.charge = (Math.random() > 0.5) ? 1.0 : -0.8;
-    this.orbitPhase = Math.random() * Math.PI * 2;
-    this.orbitTilt = (Math.random() - 0.5) * 0.8;
-    this.position = new THREE.Vector3();
-    this.velocity = new THREE.Vector3();
-
-    if (role === 'primary') {
-      this.radius = 2.0 + Math.random() * 0.5;
-      this.orbitRadius = 0.5;
-      this.orbitSpeed = 0.01;
-    } else {
-      this.radius = 0.6 + Math.random() * 0.6;
-      this.orbitRadius = 4.0 + Math.random() * 3.5;
-      this.orbitSpeed = 0.06 + Math.random() * 0.12;
-    }
+    this.spawnDuration = 2.0 + Math.random() * 1.5;
+    this.lifeDuration = 35 + Math.random() * 50;
+    this.collapseDuration = 2.5 + Math.random() * 1.5;
+    this.scaleT = 0;
 
     const geo = new THREE.IcosahedronGeometry(this.radius, 4);
     this.geometry = geo;
@@ -335,27 +356,29 @@ class Core {
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.castShadow = true;
     this.mesh.scale.setScalar(0.001); // start invisible
-    scene.add(this.mesh);
-
-    // Set initial position so particles can find it immediately
-    const angle = this.orbitPhase;
-    this.position.set(
-      Math.cos(angle) * this.orbitRadius,
-      Math.sin(this.orbitTilt) * Math.sin(angle * 1.3) * this.orbitRadius * 0.4,
-      Math.sin(angle) * this.orbitRadius
-    );
     this.mesh.position.copy(this.position);
+    scene.add(this.mesh);
   }
 
-  update(time, dt, audio, frozen) {
-    // Lifecycle
+  // Gravitational mass used by the n-body sim. Fades linearly to zero across
+  // the full collapse phase so the system's center of mass shifts smoothly
+  // instead of jumping when a body finally dies.
+  get effectiveMass() {
+    if (this.phase === 'collapsing') {
+      const t = Math.min(1, this.phaseTime / this.collapseDuration);
+      return this.mass * (1 - t);
+    }
+    return this.mass;
+  }
+
+  // Pure lifecycle + visual sync. Physics is driven externally by the Visualizer.
+  update(time, dt, audio) {
     this.phaseTime += dt;
 
     if (this.phase === 'spawning') {
-      this.scaleT = Math.min(1, this.phaseTime / this.spawnDuration);
+      const raw = Math.min(1, this.phaseTime / this.spawnDuration);
       // Elastic ease-out
-      const t = this.scaleT;
-      this.scaleT = t < 1 ? 1 - Math.pow(1 - t, 3) * Math.cos(t * Math.PI * 0.5) : 1;
+      this.scaleT = raw < 1 ? 1 - Math.pow(1 - raw, 3) * Math.cos(raw * Math.PI * 0.5) : 1;
       if (this.phaseTime >= this.spawnDuration) {
         this.phase = 'alive';
         this.phaseTime = 0;
@@ -369,7 +392,6 @@ class Core {
       }
     } else if (this.phase === 'collapsing') {
       const t = Math.min(1, this.phaseTime / this.collapseDuration);
-      // Accelerating collapse
       this.scaleT = 1 - t * t * t;
       if (this.phaseTime >= this.collapseDuration) {
         this.phase = 'dead';
@@ -381,28 +403,15 @@ class Core {
     if (!this.alive) return;
 
     this.mesh.scale.setScalar(Math.max(0.001, this.scaleT));
-
-    if (!frozen) {
-      const bass = audio.getBass();
-      const angle = time * this.orbitSpeed + this.orbitPhase;
-      const r = this.orbitRadius * (1.0 + bass * 0.35);
-      this.position.set(
-        Math.cos(angle) * r,
-        Math.sin(this.orbitTilt) * Math.sin(angle * 1.3) * r * 0.4,
-        Math.sin(angle) * r
-      );
-    }
-
     this.mesh.position.copy(this.position);
     this.mesh.rotation.y += 0.005;
     this.mesh.rotation.x += 0.003;
 
-    // Update shader uniforms
     this.uniforms.uTime.value = time;
     this.uniforms.uBass.value = audio.getBass();
     this.uniforms.uMid.value = audio.getMid();
     this.uniforms.uTreble.value = audio.getTreble();
-    this.uniforms.uBeat.value = audio.getBass();  // smooth value for potential shader use
+    this.uniforms.uBeat.value = audio.getBass();
   }
 
   destroy() {
@@ -853,16 +862,18 @@ class Visualizer {
     this.particleCount = 1500;
     this.clock = new THREE.Clock();
 
-    // Camera state
+    // Camera state — single slow drift around the system barycenter
     this.camPos = new THREE.Vector3(0, 4, 16);
     this.camTargetPos = new THREE.Vector3(0, 4, 16);
     this.camLookAt = new THREE.Vector3(0, 0, 0);
     this.camTargetLookAt = new THREE.Vector3(0, 0, 0);
-    this.camMoveTimer = 0;
-    this.camMoveDuration = 8;
-    this.camMode = 'orbit';  // 'orbit' | 'track' | 'flyby' | 'overhead' | 'dolly'
-    this.camTrackCore = null;
-    this.camOrbitAngle = 0;
+    this.camAzimuth = Math.random() * Math.PI * 2;
+    this._barycenter = new THREE.Vector3();
+    this._barycenterTarget = new THREE.Vector3();
+    this._extent = 6.0;
+
+    // System state
+    this.systemConfig = null;
 
     this._initRenderer();
     this._initScene();
@@ -912,17 +923,138 @@ class Visualizer {
 
   _initCores() {
     this.coreIdCounter = 0;
-    this.minCores = 2;
-    this.maxCores = 5;
     this.spawnCooldown = 0;
-    // Spawn initial planets: 1 primary + 2 satellites
-    this._spawnCore('primary');
-    this._spawnCore('satellite');
-    this._spawnCore('satellite');
+    this._spawnSystem();
   }
 
-  _spawnCore(role = 'satellite') {
-    const core = new Core(this.scene, this.coreIdCounter++, role);
+  // Pick a system configuration and spawn its cores with initial conditions
+  // chosen so the resulting n-body dynamics produce the intended visual feel.
+  _spawnSystem() {
+    const r = Math.random();
+    let type;
+    if (r < 0.4) type = 'solar';
+    else if (r < 0.75) type = 'binary';
+    else type = 'trinary';
+    this.systemConfig = type;
+
+    // 1.05× nudge above circular gives mildly elliptical orbits — more
+    // visually interesting than perfect circles.
+    const ELLIP = 1.05;
+
+    if (type === 'solar') {
+      const heavyMass = 7.0 + Math.random() * 3.0;
+      const heavyRadius = 1.9 + Math.random() * 0.4;
+      this._spawnCore({
+        role: 'central',
+        mass: heavyMass,
+        charge: 1.0,
+        radius: heavyRadius,
+        position: new THREE.Vector3(
+          (Math.random() - 0.5) * 0.3,
+          (Math.random() - 0.5) * 0.3,
+          (Math.random() - 0.5) * 0.3,
+        ),
+        velocity: new THREE.Vector3(
+          (Math.random() - 0.5) * 0.05,
+          (Math.random() - 0.5) * 0.02,
+          (Math.random() - 0.5) * 0.05,
+        ),
+      });
+      const satCount = 2 + Math.floor(Math.random() * 2); // 2-3
+      for (let i = 0; i < satCount; i++) {
+        const rad = 4.5 + i * 2.0 + Math.random() * 0.6;
+        const angle = Math.random() * Math.PI * 2;
+        const tilt = (Math.random() - 0.5) * 0.5;
+        const pos = new THREE.Vector3(
+          Math.cos(angle) * rad,
+          Math.sin(tilt) * rad * 0.35,
+          Math.sin(angle) * rad,
+        );
+        const v = Math.sqrt(PHYSICS_G * heavyMass / rad) * ELLIP;
+        const vel = new THREE.Vector3(-Math.sin(angle) * v, 0, Math.cos(angle) * v);
+        this._spawnCore({
+          role: 'satellite',
+          mass: 0.4 + Math.random() * 0.4,
+          charge: -0.8,
+          radius: 0.45 + Math.random() * 0.35,
+          position: pos,
+          velocity: vel,
+        });
+      }
+    } else if (type === 'binary') {
+      const mass = 2.2 + Math.random() * 0.8;
+      const radius = 1.1 + Math.random() * 0.35;
+      // Separation chosen so bodies sit ~4 radii apart minimum: clearly distinct.
+      const sep = 4.5 + Math.random() * 2.0;
+      const d = sep / 2;
+      // For two equal masses orbiting their barycenter:
+      // a = G * m_other / sep²;  v_circular = sqrt(a * d)
+      const v = Math.sqrt(PHYSICS_G * mass * d / (sep * sep)) * ELLIP;
+      this._spawnCore({
+        role: 'partner',
+        mass,
+        charge: 1.0,
+        radius,
+        position: new THREE.Vector3(-d, 0, 0),
+        velocity: new THREE.Vector3(0, 0, v),
+      });
+      this._spawnCore({
+        role: 'partner',
+        mass: mass * (0.9 + Math.random() * 0.2),
+        charge: -1.0,
+        radius: radius * (0.9 + Math.random() * 0.2),
+        position: new THREE.Vector3(d, 0, 0),
+        velocity: new THREE.Vector3(0, 0, -v),
+      });
+      if (Math.random() < 0.5) {
+        const rad = sep * (1.8 + Math.random() * 0.8);
+        const angle = Math.random() * Math.PI * 2;
+        const tilt = (Math.random() - 0.5) * 0.4;
+        const vOuter = Math.sqrt(PHYSICS_G * 2 * mass / rad) * ELLIP;
+        this._spawnCore({
+          role: 'satellite',
+          mass: 0.4,
+          charge: 0.5,
+          radius: 0.4 + Math.random() * 0.25,
+          position: new THREE.Vector3(
+            Math.cos(angle) * rad,
+            Math.sin(tilt) * rad * 0.3,
+            Math.sin(angle) * rad,
+          ),
+          velocity: new THREE.Vector3(
+            -Math.sin(angle) * vOuter,
+            0,
+            Math.cos(angle) * vOuter,
+          ),
+        });
+      }
+    } else {
+      // trinary — 3 equal bodies at 120°
+      const mass = 1.6 + Math.random() * 0.4;
+      const radius = 1.0 + Math.random() * 0.3;
+      const rad = 3.5 + Math.random() * 1.0;
+      // Symmetric 3-body: net inward accel = sqrt(3) * G * m / side²
+      // where side = rad * sqrt(3) is the equilateral triangle side.
+      const side = rad * Math.sqrt(3);
+      const a = Math.sqrt(3) * PHYSICS_G * mass / (side * side);
+      const v = Math.sqrt(a * rad) * ELLIP;
+      const charges = [1.0, -1.0, 0.8];
+      for (let i = 0; i < 3; i++) {
+        const angle = (i / 3) * Math.PI * 2;
+        this._spawnCore({
+          role: 'partner',
+          mass: mass * (0.92 + Math.random() * 0.16),
+          charge: charges[i],
+          radius: radius * (0.9 + Math.random() * 0.2),
+          position: new THREE.Vector3(Math.cos(angle) * rad, 0, Math.sin(angle) * rad),
+          velocity: new THREE.Vector3(-Math.sin(angle) * v, 0, Math.cos(angle) * v),
+        });
+      }
+    }
+  }
+
+  _spawnCore(params) {
+    const core = new Core(this.scene, this.coreIdCounter++, params);
     this.cores.push(core);
     this._applyModeToCore(core);
     return core;
@@ -934,10 +1066,87 @@ class Visualizer {
     core.applyMode(mode, palette);
   }
 
-  _updateCoreLifecycles(dt, audio) {
+  // n-body integration for the cores. Gravitational attraction between cores
+  // (mass-based, always attracting), light damping, soft restoring force toward
+  // origin so the system doesn't drift offscreen. Charges are reserved for the
+  // particle <-> core interaction (handled in MagneticParticles.update).
+  _updatePhysics(dt, audio) {
+    const bass = audio.getBass();
+    const G = PHYSICS_G * (1.0 + bass * 0.4);
+    // Very light damping (~0.2%/sec) — bleeds chaos but preserves orbits over
+    // the body's full lifespan.
+    const damping = Math.pow(0.998, dt);
+    const softening = 0.8;
+
+    const physicsCores = this.cores.filter(c => c.alive);
+    if (physicsCores.length === 0) return;
+
+    // Forces (mass-based gravitational attraction between all cores).
+    // Uses effectiveMass so a collapsing body's pull fades smoothly toward
+    // zero across its collapse phase — no instantaneous COM jump on death.
+    for (const core of physicsCores) {
+      core.acceleration.set(0, 0, 0);
+      for (const other of physicsCores) {
+        if (other === core) continue;
+        const dx = other.position.x - core.position.x;
+        const dy = other.position.y - core.position.y;
+        const dz = other.position.z - core.position.z;
+        const distSq = dx * dx + dy * dy + dz * dz + softening * softening;
+        const dist = Math.sqrt(distSq);
+        const fMag = G * other.effectiveMass / distSq;
+        core.acceleration.x += (dx / dist) * fMag;
+        core.acceleration.y += (dy / dist) * fMag;
+        core.acceleration.z += (dz / dist) * fMag;
+      }
+    }
+
+    // Symplectic Euler integration
+    for (const core of physicsCores) {
+      core.velocity.x += core.acceleration.x * dt;
+      core.velocity.y += core.acceleration.y * dt;
+      core.velocity.z += core.acceleration.z * dt;
+      core.velocity.multiplyScalar(damping);
+      core.position.x += core.velocity.x * dt;
+      core.position.y += core.velocity.y * dt;
+      core.position.z += core.velocity.z * dt;
+    }
+
+    // Pull the center of mass gradually back to origin (~95% of the offset
+    // removed per second). Applying only a fraction per frame means that when
+    // a body dies and the remaining COM shifts, the survivors *drift* back to
+    // the new center rather than teleporting. Mass-weighted by effectiveMass
+    // so dying bodies contribute less, completing the smooth handoff.
+    let cx = 0, cy = 0, cz = 0;
+    let vx = 0, vy = 0, vz = 0;
+    let totalMass = 0;
+    for (const core of physicsCores) {
+      const m = core.effectiveMass;
+      cx += core.position.x * m;
+      cy += core.position.y * m;
+      cz += core.position.z * m;
+      vx += core.velocity.x * m;
+      vy += core.velocity.y * m;
+      vz += core.velocity.z * m;
+      totalMass += m;
+    }
+    if (totalMass > 0.0001) {
+      cx /= totalMass; cy /= totalMass; cz /= totalMass;
+      vx /= totalMass; vy /= totalMass; vz /= totalMass;
+      const recenterFrac = 1 - Math.pow(0.05, dt); // ~95%/s
+      for (const core of physicsCores) {
+        core.position.x -= cx * recenterFrac;
+        core.position.y -= cy * recenterFrac;
+        core.position.z -= cz * recenterFrac;
+        core.velocity.x -= vx * recenterFrac;
+        core.velocity.y -= vy * recenterFrac;
+        core.velocity.z -= vz * recenterFrac;
+      }
+    }
+  }
+
+  _updateCoreLifecycles(dt) {
     this.spawnCooldown = Math.max(0, this.spawnCooldown - dt);
 
-    // Remove dead cores
     for (let i = this.cores.length - 1; i >= 0; i--) {
       if (!this.cores[i].alive && this.cores[i].phase === 'dead') {
         this.cores[i].destroy();
@@ -945,21 +1154,10 @@ class Visualizer {
       }
     }
 
-    // Count alive (not dead) cores
-    const aliveCores = this.cores.filter(c => c.phase !== 'dead').length;
-
-    // Spawn new ones if below minimum, or randomly on beats
-    const hasPrimary = this.cores.some(c => c.role === 'primary' && c.phase !== 'dead');
-    if (aliveCores < this.minCores && this.spawnCooldown <= 0) {
-      this._spawnCore(hasPrimary ? 'satellite' : 'primary');
-      this.spawnCooldown = 2.0;
-    } else if (aliveCores < this.maxCores && this.spawnCooldown <= 0) {
-      // Gradual spawn chance (~every 10s on average)
-      const timedSpawn = Math.random() < dt * 0.1;
-      if (timedSpawn) {
-        this._spawnCore(hasPrimary ? 'satellite' : 'primary');
-        this.spawnCooldown = 5.0;
-      }
+    const aliveCount = this.cores.filter(c => c.phase !== 'dead').length;
+    if (aliveCount === 0 && this.spawnCooldown <= 0) {
+      this._spawnSystem();
+      this.spawnCooldown = 1.5;
     }
   }
 
@@ -977,9 +1175,9 @@ class Visualizer {
 
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      1.5,   // strength - higher for that glow-everything look
-      0.6,   // radius
-      0.15   // threshold - low so everything glows
+      0.9,   // strength
+      0.5,   // radius
+      0.45   // threshold - only the brightest particle cores bloom
     );
     this.composer.addPass(this.bloomPass);
   }
@@ -1116,143 +1314,52 @@ class Visualizer {
     this._animate();
   }
 
-  _pickRandomAliveCore() {
+  // Single continuous slow drift around the system's barycenter. Camera
+  // distance scales with the system's current extent so all bodies stay framed.
+  _updateCamera(wallTime, dt) {
     const alive = this.cores.filter(c => c.alive);
-    return alive.length > 0 ? alive[Math.floor(Math.random() * alive.length)] : null;
-  }
 
-  _pickPrimaryCore() {
-    const primary = this.cores.find(c => c.role === 'primary' && c.alive);
-    return primary || this._pickRandomAliveCore();
-  }
-
-  _switchCameraMode(wallTime) {
-    const modes = ['track', 'track', 'closePrimary', 'closePrimary', 'flyby', 'flyby', 'orbit', 'dolly'];
-    this.camMode = modes[Math.floor(Math.random() * modes.length)];
-    this.camTrackCore = this.camMode === 'closePrimary' ? this._pickPrimaryCore() : this._pickRandomAliveCore();
-    this.camMoveDuration = 10 + Math.random() * 15; // 10-25 seconds per move
-    this.camMoveTimer = 0;
-    this.camOrbitAngle = wallTime * 0.08; // sync orbit angle
-  }
-
-  _updateCamera(wallTime, dt, audio) {
-    const mid = audio.getMid();
-    const volume = audio.getVolume();
-
-    this.camMoveTimer += dt;
-
-    // Switch camera mode periodically
-    if (this.camMoveTimer >= this.camMoveDuration) {
-      this._switchCameraMode(wallTime);
+    let bx = 0, by = 0, bz = 0, totalMass = 0;
+    for (const c of alive) {
+      const m = c.effectiveMass;
+      bx += c.position.x * m;
+      by += c.position.y * m;
+      bz += c.position.z * m;
+      totalMass += m;
     }
-
-    // If tracking a dead core, switch early
-    if (this.camTrackCore && !this.camTrackCore.alive) {
-      this._switchCameraMode(wallTime);
+    if (totalMass > 0.0001) {
+      this._barycenterTarget.set(bx / totalMass, by / totalMass, bz / totalMass);
     }
+    this._barycenter.lerp(this._barycenterTarget, 0.04);
 
-    // Compute target position and look-at based on mode
-    this.camOrbitAngle += dt * (0.04 + volume * 0.02);
-
-    switch (this.camMode) {
-      case 'orbit': {
-        // Wide orbit — see the whole system
-        const dist = 9 + Math.sin(wallTime * 0.02) * 2;
-        const height = 3 + Math.sin(wallTime * 0.03) * 2 + mid * 0.5;
-        this.camTargetPos.set(
-          Math.sin(this.camOrbitAngle) * dist,
-          height,
-          Math.cos(this.camOrbitAngle) * dist
-        );
-        this.camTargetLookAt.set(0, 0, 0);
-        break;
-      }
-      case 'track': {
-        // Follow a planet closely
-        const core = this.camTrackCore;
-        if (core && core.alive) {
-          const trackDist = core.radius * 1.8 + 1.0;
-          this.camTargetPos.set(
-            core.position.x + Math.sin(this.camOrbitAngle * 0.8) * trackDist,
-            core.position.y + 1.0 + Math.sin(wallTime * 0.06) * 0.8,
-            core.position.z + Math.cos(this.camOrbitAngle * 0.8) * trackDist
-          );
-          this.camTargetLookAt.copy(core.position);
-        } else {
-          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 9, 3, Math.cos(this.camOrbitAngle) * 9);
-          this.camTargetLookAt.set(0, 0, 0);
-        }
-        break;
-      }
-      case 'closePrimary': {
-        // Signature "magnetosphere shot" — primary fills the frame
-        const core = this.camTrackCore;
-        if (core && core.alive) {
-          const dist = core.radius * 2.0;
-          const bobHeight = Math.sin(wallTime * 0.04) * 0.5;
-          this.camTargetPos.set(
-            core.position.x + Math.sin(this.camOrbitAngle * 0.3) * dist,
-            core.position.y + bobHeight + 0.5,
-            core.position.z + Math.cos(this.camOrbitAngle * 0.3) * dist
-          );
-          this.camTargetLookAt.copy(core.position);
-        } else {
-          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 6, 2, Math.cos(this.camOrbitAngle) * 6);
-          this.camTargetLookAt.set(0, 0, 0);
-        }
-        break;
-      }
-      case 'flyby': {
-        // Slow, graceful arc past a planet
-        const core = this.camTrackCore;
-        const t = this.camMoveTimer / this.camMoveDuration;
-        if (core && core.alive) {
-          const sweepAngle = t * Math.PI;
-          const dist = core.radius * 1.5 + 0.5 + Math.sin(t * Math.PI) * 1.5;
-          this.camTargetPos.set(
-            core.position.x + Math.sin(sweepAngle) * dist,
-            core.position.y + 0.8 + Math.cos(sweepAngle * 0.5) * 1.5,
-            core.position.z + Math.cos(sweepAngle) * dist
-          );
-          this.camTargetLookAt.copy(core.position);
-        } else {
-          this.camTargetPos.set(Math.sin(this.camOrbitAngle) * 8, 2, Math.cos(this.camOrbitAngle) * 8);
-          this.camTargetLookAt.set(0, 0, 0);
-        }
-        break;
-      }
-      case 'overhead': {
-        // High angle with slow drift
-        const dist = 10 + Math.sin(wallTime * 0.015) * 2;
-        this.camTargetPos.set(
-          Math.sin(this.camOrbitAngle * 0.2) * 4,
-          dist,
-          Math.cos(this.camOrbitAngle * 0.2) * 4
-        );
-        this.camTargetLookAt.set(0, 0, 0);
-        break;
-      }
-      case 'dolly': {
-        // Slow push-in toward a planet, then pull back
-        const t = this.camMoveTimer / this.camMoveDuration;
-        const pushPull = Math.sin(t * Math.PI);
-        const dist = 12 - pushPull * 8;
-        this.camTargetPos.set(
-          Math.sin(this.camOrbitAngle * 0.4) * dist * 0.5,
-          2.0 + Math.sin(wallTime * 0.05) * 1.5,
-          Math.cos(this.camOrbitAngle * 0.4) * dist
-        );
-        const nearest = this._pickRandomAliveCore();
-        this.camTargetLookAt.copy(nearest ? nearest.position : new THREE.Vector3());
-        break;
-      }
+    let extentTarget = 5.5;
+    for (const c of alive) {
+      const dx = c.position.x - this._barycenter.x;
+      const dy = c.position.y - this._barycenter.y;
+      const dz = c.position.z - this._barycenter.z;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz) + c.radius;
+      if (d > extentTarget) extentTarget = d;
     }
+    this._extent = THREE.MathUtils.lerp(this._extent, extentTarget, 0.03);
 
-    // Smooth interpolation — all gentle
-    const lerpSpeed = this.camMode === 'flyby' ? 0.02 : this.camMode === 'dolly' ? 0.012 : this.camMode === 'closePrimary' ? 0.015 : 0.018;
-    this.camPos.lerp(this.camTargetPos, lerpSpeed);
-    this.camLookAt.lerp(this.camTargetLookAt, lerpSpeed);
+    // Slow continuous tour: ~one full azimuth revolution per ~100s, elevation
+    // and distance breathe on different periods so the angle is rarely the same.
+    this.camAzimuth += dt * 0.062;
+    const elevation = Math.sin(wallTime * 0.022) * 0.45 + 0.18;
+    const distMult = 2.15 + Math.sin(wallTime * 0.028) * 0.3;
+    const camDist = this._extent * distMult;
+    const cosE = Math.cos(elevation);
+    const sinE = Math.sin(elevation);
 
+    this.camTargetPos.set(
+      this._barycenter.x + Math.cos(this.camAzimuth) * cosE * camDist,
+      this._barycenter.y + sinE * camDist,
+      this._barycenter.z + Math.sin(this.camAzimuth) * cosE * camDist,
+    );
+    this.camTargetLookAt.copy(this._barycenter);
+
+    this.camPos.lerp(this.camTargetPos, 0.02);
+    this.camLookAt.lerp(this.camTargetLookAt, 0.04);
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camLookAt);
   }
@@ -1260,11 +1367,14 @@ class Visualizer {
   _animate() {
     requestAnimationFrame(() => this._animate());
 
-    const wallTime = this.clock.getElapsedTime();
-    const dt = this.clock.getDelta();
+    // getElapsedTime() internally consumes the delta, so call getDelta() first
+    // and read elapsedTime directly. Clamp dt so a tab-switch doesn't blow up
+    // the physics integration on the resume frame.
+    const rawDt = this.clock.getDelta();
+    const dt = Math.min(rawDt, 1 / 30);
+    const wallTime = this.clock.elapsedTime;
     this.audio.update();
 
-    // Compute simulation time that pauses when frozen
     let simTime;
     if (this.frozen) {
       simTime = this.frozenAtTime - this.frozenOffset;
@@ -1275,23 +1385,26 @@ class Visualizer {
     const bass = this.audio.getBass();
     const volume = this.audio.getVolume();
     const treble = this.audio.getTreble();
-    // Update planet lifecycles (spawn/collapse)
-    this._updateCoreLifecycles(dt, this.audio);
 
-    // Camera
-    this._updateCamera(wallTime, dt, this.audio);
+    this._updateCoreLifecycles(dt);
 
-    // Central light reacts
+    // Physics: cores attract each other gravitationally; sets fresh positions
+    // before camera and particles read them. Skipped when frozen.
+    if (!this.frozen) {
+      this._updatePhysics(dt, this.audio);
+    }
+
+    // Visual sync for cores (mesh transform + shader uniforms)
+    for (const core of this.cores) {
+      core.update(simTime, dt, this.audio);
+    }
+
+    this._updateCamera(wallTime, dt);
+
     this.centralLight.intensity = 2.5 + bass * 4.0 + volume * 2.0;
     const hue = 0.6 + treble * 0.1;
     this.centralLight.color.setHSL(hue, 0.5, 0.5 + volume * 0.3);
 
-    // Update cores
-    for (const core of this.cores) {
-      core.update(simTime, dt, this.audio, this.frozen);
-    }
-
-    // Update magnetic particles
     this.particles.update(this.audio, dt);
 
     // Nebula
@@ -1301,7 +1414,7 @@ class Visualizer {
     this.starfield.rotation.y += 0.00008;
 
     // Bloom reacts to volume
-    this.bloomPass.strength = 1.5 + volume * 2.0;
+    this.bloomPass.strength = 0.9 + volume * 1.2;
 
     this.composer.render();
   }
