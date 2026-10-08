@@ -32,7 +32,7 @@ No build system, no bundler, no tests, no linter. Three.js 0.162 is loaded from 
 | `AudioAnalyzer` | FFT analysis of real audio via Web Audio API (fftSize 2048). Band averages (bass / mid / treble / volume) with asymmetric smoothing (fast rise, slow decay), plus per-bin smoothed data for particles. |
 | `DemoAnalyzer` | Fake audio for demo mode, same interface as AudioAnalyzer. |
 | `Core` | A planet. Has a `role` (`central`, `satellite` or `partner`), `mass`, `charge`, `radius`, lifecycle (`spawning -> alive -> collapsing -> dead`), and a custom GLSL shader (hot nucleus, halo, rim, drifting value-noise atmosphere). Physics state (`position`, `velocity`, `acceleration`) is integrated by the Visualizer, not by the Core. |
-| `MagneticParticles` | Up to 5000 particles with per-particle FFT bin response, charge and trails. Coulomb-style attraction/repulsion to cores plus a tangential force for orbiting. Rendered as a `Points` cloud plus a `LineSegments` trail buffer. |
+| `MagneticParticles` | Up to 5000 particles that trace magnetic field lines. Every alive core is a monopole with its `effectiveCharge`; particles are emitted at positive cores, follow the summed field, and land on negative cores (if no positive core is alive the survivors emit outward instead). Dormant pool plus an emission budget: rate and speed follow volume, so streams thin out when quiet. Each particle's FFT bin drives brightness and a sideways shimmer. All motion is `dt`-scaled. Knobs live in `PARTICLE_TUNING`. Rendered as a `Points` cloud plus a `LineSegments` trail buffer. |
 | `Nebula` | 12 procedural sprite blobs with additive blending. Off by default, toggled with B. |
 | `Visualizer` | Main orchestrator: scene, camera, bloom post-processing, system spawning, n-body physics, core lifecycle, camera drift. |
 
@@ -48,7 +48,7 @@ No build system, no bundler, no tests, no linter. Three.js 0.162 is loaded from 
 
 Charges are only used for the particle <-> core interaction. Gravity is mass-based and always attracting.
 
-Lifecycle: spawn (2-3.5 s elastic scale-in), alive (35-85 s), collapse (2.5-4 s scale-out), dead (mesh destroyed). When the last body of a system dies, a new system spawns.
+Lifecycle: spawn (2-3.5 s elastic scale-in), alive (35-85 s), collapse (2.5-4 s scale-out), dead (mesh destroyed). When the last body of a system dies, a new system spawns. A collapsing core pulls nearby particles in (and stops absorbing them past 30% collapse so they pile up), then releases them in an outward burst on the frame it dies.
 
 ## Camera
 
@@ -80,15 +80,15 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
 - **Smoothness & feel**: iterative removal of beat-reactive jerkiness; asymmetric smoothing (fast rise, slow decay)
 - **Camera & composition**: single smooth drift around the barycenter, extent-aware framing, smooth-only rule
 - **Orbital dynamics**: cores rewritten as an n-body gravity sim with solar / binary / trinary system types and smooth barycenter handoff on collapse
+- **Field-line particles**: particles trace the monopole field from positive to negative cores, `dt`-scaled, with emission that thins out when quiet, collapse pull and death burst
 - **UI polish**: help overlay, keyboard shortcuts, mode/palette cycling, overlay z-index fixes
 
 ### Open work areas
 
-1. **Particle dynamism**: particles still use the pre-n-body model and don't know about system types or roles
-   - Particle behavior near cores (swarming, spiraling, bursting)
-   - Particle physics is per-frame, not `dt`-scaled (cores are), so particle speed depends on refresh rate
-   - Lifecycle drama: spawn/collapse moments should pull the particles in with them
-   - Overall sense of "life" when music is playing vs. quiet
+1. **Particle feel**: tune `PARTICLE_TUNING` by eye (speeds, emission, shimmer, pull, burst)
+   - Trails are JS arrays with `splice`, GC churn at 5000 particles
+   - A particle's trail vanishes with it on landing instead of draining into the core
+   - Particles ignore `role` beyond the sign of the charge
 
 2. **Audio reactivity**: better mapping from sound to visuals
    - Per-frequency-band response tuning (bass -> planets, mids -> particles, highs -> sparkle)

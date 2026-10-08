@@ -371,6 +371,20 @@ class Core {
     return this.mass;
   }
 
+  // 0 -> 1 across the collapse phase, 0 otherwise. Particles read it for the
+  // inward pull and to stop landing on a body that's about to go.
+  get collapseT() {
+    if (this.phase !== 'collapsing') return 0;
+    return Math.min(1, this.phaseTime / this.collapseDuration);
+  }
+
+  // Charge as the particle field sees it. Ramps in with the spawn scale so a
+  // new body's streams fade in, and out across the collapse so its lines hand
+  // off to the survivors instead of vanishing on the death frame.
+  get effectiveCharge() {
+    return this.charge * this.scaleT;
+  }
+
   // Pure lifecycle + visual sync. Physics is driven externally by the Visualizer.
   update(time, dt, audio) {
     this.phaseTime += dt;
@@ -433,6 +447,34 @@ class Core {
 
 // ─── Magnetic Particle System ────────────────────────────────────────────────
 
+// Particles trace magnetic field lines. Every alive core is a monopole with
+// its effectiveCharge; the field at a point is the sum of q * r / |r|^3 over
+// cores. Positive cores are sources, negative cores are sinks, so a particle
+// born at a positive core streams along the field and lands on a negative one.
+//
+// All speeds are scene units per second, rates are particles per second.
+// These are the knobs to turn while watching Demo Mode.
+const PARTICLE_TUNING = {
+  speedBase:    1.6,   // cruise speed along a field line at silence
+  speedVolume:  2.2,   // extra speed per unit of volume
+  poleBoost:    0.8,   // up to +80% speed where the field is strong (near a core)
+  poleFieldRef: 0.5,   // |B| at which poleBoost saturates
+  steer:        10,    // 1/s, how fast velocity turns toward the field line
+  rateBase:     0.05,  // emission at silence, as a fraction of count per second
+  rateVolume:   0.7,   // extra emission per unit of volume
+  maxBurst:     0.05,  // cap on emissions per frame, as a fraction of count
+  shimmer:      0.6,   // sideways wobble speed driven by the particle's FFT bin
+  fadeIn:       0.25,  // seconds to full brightness after emission
+  maxAge:       10,    // seconds before a particle is recycled regardless
+  pullRadii:    4,     // a collapsing core pulls particles from this many radii out
+  pullStrength: 7,     // inward speed added at full collapse, at the core
+  burstSpeed:   8,     // outward impulse when a core dies
+  burstRadii:   2.5,   // particles within this many radii of a dying core get it
+  kickDecay:    1.2,   // seconds for a burst to hand control back to the field
+  boundaryMult: 2.2,   // lines that escape past this many extents recycle
+  boundaryMin:  12,    // ...but never closer than this
+};
+
 class MagneticParticles {
   constructor(scene, cores, initialCount) {
     this.scene = scene;
@@ -441,25 +483,39 @@ class MagneticParticles {
     this.count = initialCount;
     this.trailLength = 30;
     this.rayStyle = 'ribbon';
+    this.t = 0;
+    this.emitBudget = 0;
 
-    // Per-particle state
-    this.positions = new Float32Array(this.maxCount * 3);
-    this.velocities = new Float32Array(this.maxCount * 3);
-    this.charges = new Float32Array(this.maxCount);
-    this.lifetimes = new Float32Array(this.maxCount);
-    this.freqBins = new Uint16Array(this.maxCount); // which FFT bin each particle responds to
-    this.trails = []; // Array of arrays for trail history
+    // Per-particle state. Everything starts dormant (hidden) and is released
+    // through the emission budget, so streams build up over the first second.
+    const n = this.maxCount;
+    this.positions = new Float32Array(n * 3);
+    this.velocities = new Float32Array(n * 3);
+    this.active = new Uint8Array(n);      // 0 dormant (hidden), 1 in flight
+    this.flowDir = new Int8Array(n);      // +1 follows B, -1 follows -B
+    this.ages = new Float32Array(n);
+    this.kicks = new Float32Array(n);     // seconds of reduced steering left after a burst
+    this.brightness = new Float32Array(n);
+    this.freqBins = new Uint16Array(n);   // which FFT bin each particle responds to
+    this.phases = new Float32Array(n);    // shimmer phase offset
+    this.trails = [];                     // per-particle position history (flat xyz)
 
-    for (let i = 0; i < this.maxCount; i++) {
-      this._initParticle(i);
+    for (let i = 0; i < n; i++) {
+      this.freqBins[i] = Math.floor(Math.random() * 1024);
+      this.phases[i] = Math.random() * Math.PI * 2;
       this.trails[i] = [];
     }
 
+    // Emitter table, rebuilt every frame: cores plus cumulative weights.
+    this._emitters = [];
+    this._emitWeights = [];
+    this._emitTotal = 0;
+
     // --- Point particles ---
     this.pointGeo = new THREE.BufferGeometry();
-    this.pointPositions = new Float32Array(this.maxCount * 3);
-    this.pointColors = new Float32Array(this.maxCount * 3);
-    this.pointSizes = new Float32Array(this.maxCount);
+    this.pointPositions = new Float32Array(n * 3);
+    this.pointColors = new Float32Array(n * 3);
+    this.pointSizes = new Float32Array(n);
     this.pointGeo.setAttribute('position', new THREE.BufferAttribute(this.pointPositions, 3));
     this.pointGeo.setAttribute('color', new THREE.BufferAttribute(this.pointColors, 3));
     this.pointGeo.setAttribute('size', new THREE.BufferAttribute(this.pointSizes, 1));
@@ -494,8 +550,8 @@ class MagneticParticles {
     scene.add(this.points);
 
     // --- Trail lines (ribbons) ---
-    // We'll use a LineSegments geometry for efficiency
-    this.maxTrailVerts = this.maxCount * 60 * 2; // pairs of vertices for segments
+    // LineSegments geometry: a pair of vertices per segment.
+    this.maxTrailVerts = n * 60 * 2;
     this.trailGeo = new THREE.BufferGeometry();
     this.trailPositions = new Float32Array(this.maxTrailVerts * 3);
     this.trailColors = new Float32Array(this.maxTrailVerts * 3);
@@ -521,31 +577,11 @@ class MagneticParticles {
     this._tmpColorParticle = new THREE.Color();
   }
 
-  _initParticle(i) {
-    // Spawn near a random core
-    const core = this.cores[Math.floor(Math.random() * this.cores.length)];
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
-    const r = core.radius * (1.0 + Math.random() * 0.5);
-
-    const i3 = i * 3;
-    this.positions[i3]     = core.position.x + r * Math.sin(phi) * Math.cos(theta);
-    this.positions[i3 + 1] = core.position.y + r * Math.sin(phi) * Math.sin(theta);
-    this.positions[i3 + 2] = core.position.z + r * Math.cos(phi);
-
-    // Small initial velocity
-    const speed = 0.01 + Math.random() * 0.02;
-    this.velocities[i3]     = (Math.random() - 0.5) * speed;
-    this.velocities[i3 + 1] = (Math.random() - 0.5) * speed;
-    this.velocities[i3 + 2] = (Math.random() - 0.5) * speed;
-
-    this.charges[i] = (Math.random() > 0.5 ? 1 : -1) * (0.5 + Math.random() * 0.5);
-    this.lifetimes[i] = 0.5 + Math.random() * 0.5;
-    this.freqBins[i] = Math.floor(Math.random() * 1024);
-  }
-
   setCount(n) {
-    this.count = Math.max(100, Math.min(this.maxCount, n));
+    const next = Math.max(100, Math.min(this.maxCount, n));
+    // Anything above the new count goes dormant so it isn't left frozen on screen.
+    for (let i = next; i < this.count; i++) this._sleep(i);
+    this.count = next;
   }
 
   applyMode(mode, palette) {
@@ -558,102 +594,248 @@ class MagneticParticles {
     this.trailLines.visible = (mode.rayStyle === 'ribbon' || mode.rayStyle === 'line');
   }
 
-  update(audio, dt) {
-    const treble = audio.getTreble();
-    const volume = audio.getVolume();
+  // Sources for this frame. Positive cores emit, weighted by charge. If none
+  // is alive (the sinks outlived the sources) the remaining cores emit instead,
+  // flowing against the field, so a lone sink still has streams. Those lines
+  // escape to the boundary and recycle there.
+  _buildEmitters(alive) {
+    this._emitters.length = 0;
+    this._emitWeights.length = 0;
+    this._emitTotal = 0;
 
-    const forceStrength = 0.0004 + volume * 0.003;
-    const damping = 0.985;
-    const maxSpeed = 0.15 + volume * 0.3;
+    let anyPositive = false;
+    for (const c of alive) {
+      if (c.effectiveCharge > 0.01) { anyPositive = true; break; }
+    }
+    for (const c of alive) {
+      const w = anyPositive ? c.effectiveCharge : Math.abs(c.effectiveCharge);
+      if (w <= 0.01) continue;
+      this._emitTotal += w;
+      this._emitters.push(c);
+      this._emitWeights.push(this._emitTotal);
+    }
+  }
+
+  _pickEmitter() {
+    const r = Math.random() * this._emitTotal;
+    for (let k = 0; k < this._emitters.length; k++) {
+      if (r <= this._emitWeights[k]) return this._emitters[k];
+    }
+    return this._emitters[this._emitters.length - 1];
+  }
+
+  // Release a dormant particle just above a core's surface, heading outward.
+  _emit(i, core) {
+    const i3 = i * 3;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const nx = Math.sin(phi) * Math.cos(theta);
+    const ny = Math.sin(phi) * Math.sin(theta);
+    const nz = Math.cos(phi);
+    const r = core.radius * Math.max(core.scaleT, 0.05) * (1.03 + Math.random() * 0.12);
+
+    this.positions[i3]     = core.position.x + nx * r;
+    this.positions[i3 + 1] = core.position.y + ny * r;
+    this.positions[i3 + 2] = core.position.z + nz * r;
+
+    const s = PARTICLE_TUNING.speedBase;
+    this.velocities[i3]     = nx * s;
+    this.velocities[i3 + 1] = ny * s;
+    this.velocities[i3 + 2] = nz * s;
+
+    this.active[i] = 1;
+    this.flowDir[i] = core.effectiveCharge >= 0 ? 1 : -1;
+    this.ages[i] = 0;
+    this.kicks[i] = 0;
+    this.brightness[i] = 0;
+    this.trails[i].length = 0;
+  }
+
+  _sleep(i) {
+    this.active[i] = 0;
+    this.brightness[i] = 0;
+    this.pointSizes[i] = 0;
+    this.trails[i].length = 0;
+  }
+
+  // One-time outward impulse for everything a dying core had gathered in.
+  // Kicked particles steer back onto the field slowly so the puff reads.
+  _burst(core) {
+    const T = PARTICLE_TUNING;
+    const reach = core.radius * T.burstRadii + 0.5;
+    const reachSq = reach * reach;
+    const spread = 0.35;
+
+    for (let i = 0; i < this.count; i++) {
+      if (!this.active[i]) continue;
+      const i3 = i * 3;
+      const dx = this.positions[i3]     - core.position.x;
+      const dy = this.positions[i3 + 1] - core.position.y;
+      const dz = this.positions[i3 + 2] - core.position.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > reachSq) continue;
+
+      const d = Math.sqrt(d2) + 0.001;
+      let ox = dx / d + (Math.random() - 0.5) * spread;
+      let oy = dy / d + (Math.random() - 0.5) * spread;
+      let oz = dz / d + (Math.random() - 0.5) * spread;
+      const ol = Math.sqrt(ox * ox + oy * oy + oz * oz) || 1;
+      const s = T.burstSpeed * (0.7 + Math.random() * 0.6) / ol;
+      this.velocities[i3]     = ox * s;
+      this.velocities[i3 + 1] = oy * s;
+      this.velocities[i3 + 2] = oz * s;
+      this.kicks[i] = T.kickDecay;
+    }
+  }
+
+  // ctx: { barycenter: Vector3, extent: number, died: Core[] }
+  update(audio, dt, ctx) {
+    const T = PARTICLE_TUNING;
+    const volume = audio.getVolume();
+    const treble = audio.getTreble();
+    this.t += dt;
+
+    const alive = [];
+    for (const c of this.cores) if (c.alive) alive.push(c);
+    this._buildEmitters(alive);
+
+    for (const core of ctx.died) this._burst(core);
+
+    const bx = ctx.barycenter.x, by = ctx.barycenter.y, bz = ctx.barycenter.z;
+    const boundary = Math.max(T.boundaryMin, ctx.extent * T.boundaryMult);
+    const boundarySq = boundary * boundary;
+
+    // Emission budget: fractional particles accumulate across frames, capped
+    // so a stalled tab can't dump the whole pool in one frame when it resumes.
+    const rate = this.count * (T.rateBase + volume * T.rateVolume);
+    this.emitBudget = Math.min(this.emitBudget + rate * dt, this.count * T.maxBurst);
+    const canEmit = this._emitTotal > 0.0001;
+
+    const speed = T.speedBase + volume * T.speedVolume;
+    const steerBase = Math.min(1, dt * T.steer);
+    const shimmerT = this.t * 6;
 
     for (let i = 0; i < this.count; i++) {
       const i3 = i * 3;
 
-      // Per-particle FFT influence
-      const freqAmp = audio.getFreqBin(this.freqBins[i]);
-      const chargeBoost = 1.0 + freqAmp * 2.0;
-      const pCharge = this.charges[i] * chargeBoost;
-
-      // Sum forces from all cores
-      let fx = 0, fy = 0, fz = 0;
-      for (const core of this.cores) {
-        const dx = core.position.x - this.positions[i3];
-        const dy = core.position.y - this.positions[i3 + 1];
-        const dz = core.position.z - this.positions[i3 + 2];
-        const distSq = dx * dx + dy * dy + dz * dz + 0.1;
-        const dist = Math.sqrt(distSq);
-
-        // Coulomb-like: F = k * q1 * q2 / r^2
-        const F = forceStrength * pCharge * core.charge / distSq;
-
-        fx += (dx / dist) * F;
-        fy += (dy / dist) * F;
-        fz += (dz / dist) * F;
-
-        // Tangential force (creates orbiting behavior)
-        const tx = -dz / dist;
-        const tz = dx / dist;
-        const tangentF = forceStrength * 0.5 * Math.abs(pCharge);
-        fx += tx * tangentF;
-        fz += tz * tangentF;
-      }
-
-      // Apply forces
-      this.velocities[i3]     = (this.velocities[i3] + fx) * damping;
-      this.velocities[i3 + 1] = (this.velocities[i3 + 1] + fy) * damping;
-      this.velocities[i3 + 2] = (this.velocities[i3 + 2] + fz) * damping;
-
-      // Clamp speed
-      const vx = this.velocities[i3], vy = this.velocities[i3 + 1], vz = this.velocities[i3 + 2];
-      const speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
-      if (speed > maxSpeed) {
-        const scale = maxSpeed / speed;
-        this.velocities[i3] *= scale;
-        this.velocities[i3 + 1] *= scale;
-        this.velocities[i3 + 2] *= scale;
-      }
-
-      // Integrate position
-      this.positions[i3]     += this.velocities[i3];
-      this.positions[i3 + 1] += this.velocities[i3 + 1];
-      this.positions[i3 + 2] += this.velocities[i3 + 2];
-
-      // Lifetime
-      this.lifetimes[i] -= 0.002 + treble * 0.005;
-      if (this.lifetimes[i] <= 0 || speed < 0.0001 ||
-          Math.abs(this.positions[i3]) > 40) {
-        this._initParticle(i);
-        this.trails[i] = [];
-      }
-
-      // Store trail
-      if (this.trailLength > 0) {
-        this.trails[i].push(
-          this.positions[i3],
-          this.positions[i3 + 1],
-          this.positions[i3 + 2]
-        );
-        // Each position is 3 floats, so max entries = trailLength * 3
-        const maxEntries = this.trailLength * 3;
-        if (this.trails[i].length > maxEntries) {
-          this.trails[i].splice(0, this.trails[i].length - maxEntries);
+      if (!this.active[i]) {
+        if (canEmit && this.emitBudget >= 1) {
+          this._emit(i, this._pickEmitter());
+          this.emitBudget -= 1;
+        } else {
+          this.pointSizes[i] = 0;
+          continue;
         }
       }
 
-      // Update point visuals
-      const life = this.lifetimes[i];
-      this.pointPositions[i3]     = this.positions[i3];
-      this.pointPositions[i3 + 1] = this.positions[i3 + 1];
-      this.pointPositions[i3 + 2] = this.positions[i3 + 2];
+      let px = this.positions[i3], py = this.positions[i3 + 1], pz = this.positions[i3 + 2];
+      let vx = this.velocities[i3], vy = this.velocities[i3 + 1], vz = this.velocities[i3 + 2];
+      const age = this.ages[i];
 
-      // Color by charge and frequency
-      const t = freqAmp;
-      const c = this._tmpColorParticle.lerpColors(this.outerColor, this.innerColor, t);
-      this.pointColors[i3]     = c.r * life;
-      this.pointColors[i3 + 1] = c.g * life;
-      this.pointColors[i3 + 2] = c.b * life;
+      // Field at p, plus the collapse pull, plus surface contact.
+      let fx = 0, fy = 0, fz = 0;
+      let pullX = 0, pullY = 0, pullZ = 0;
+      let absorbed = false;
+      for (const core of alive) {
+        const dx = px - core.position.x;
+        const dy = py - core.position.y;
+        const dz = pz - core.position.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        const ct = core.collapseT;
 
-      this.pointSizes[i] = (1.0 + freqAmp * 3.0) * life;
+        // Landing on a surface ends the trip. A core past the early part of
+        // its collapse doesn't absorb: it hoards particles at its center so
+        // there's something to release when it dies.
+        const surface = core.radius * Math.max(core.scaleT, 0.05);
+        if (d2 < surface * surface && age > 0.05 && ct < 0.3) { absorbed = true; break; }
+
+        const d = Math.sqrt(d2 + 0.05);
+        const q = core.effectiveCharge / (d * d * d);
+        fx += q * dx;
+        fy += q * dy;
+        fz += q * dz;
+
+        if (ct > 0) {
+          const reach = core.radius * T.pullRadii + 1;
+          if (d < reach) {
+            const g = (1 - d / reach) * ct * ct * T.pullStrength / d;
+            pullX -= dx * g;
+            pullY -= dy * g;
+            pullZ -= dz * g;
+          }
+        }
+      }
+
+      const fmag = Math.sqrt(fx * fx + fy * fy + fz * fz);
+      if (absorbed || fmag < 1e-6) { this._sleep(i); continue; }
+
+      // Unit flow direction along (or against) the field, faster where the
+      // field is strong so lines rush in and out of the poles.
+      const inv = this.flowDir[i] / fmag;
+      const ux = fx * inv, uy = fy * inv, uz = fz * inv;
+      const s = speed * (1 + Math.min(1, fmag / T.poleFieldRef) * T.poleBoost);
+
+      // Shimmer: a small wobble perpendicular to the line, sized by this
+      // particle's FFT bin and the treble so highs make the arcs sparkle.
+      const freqAmp = audio.getFreqBin(this.freqBins[i]);
+      let qx = uz, qy = 0, qz = -ux;
+      let ql = Math.sqrt(qx * qx + qz * qz);
+      if (ql < 0.1) { qx = 0; qy = uz; qz = -uy; ql = Math.sqrt(qy * qy + qz * qz) || 1; }
+      const sh = T.shimmer * freqAmp * (0.3 + treble) * Math.sin(shimmerT + this.phases[i]) / ql;
+
+      const tx = ux * s + qx * sh + pullX;
+      const ty = uy * s + qy * sh + pullY;
+      const tz = uz * s + qz * sh + pullZ;
+
+      let steer = steerBase;
+      if (this.kicks[i] > 0) {
+        steer *= 0.15;
+        this.kicks[i] -= dt;
+      }
+      vx += (tx - vx) * steer;
+      vy += (ty - vy) * steer;
+      vz += (tz - vz) * steer;
+
+      px += vx * dt;
+      py += vy * dt;
+      pz += vz * dt;
+
+      this.ages[i] = age + dt;
+      const ex = px - bx, ey = py - by, ez = pz - bz;
+      if (ex * ex + ey * ey + ez * ez > boundarySq || this.ages[i] > T.maxAge) {
+        this._sleep(i);
+        continue;
+      }
+
+      this.positions[i3] = px; this.positions[i3 + 1] = py; this.positions[i3 + 2] = pz;
+      this.velocities[i3] = vx; this.velocities[i3 + 1] = vy; this.velocities[i3 + 2] = vz;
+
+      // Store trail
+      if (this.trailLength > 0) {
+        const trail = this.trails[i];
+        trail.push(px, py, pz);
+        // Each position is 3 floats, so max entries = trailLength * 3
+        const maxEntries = this.trailLength * 3;
+        if (trail.length > maxEntries) {
+          trail.splice(0, trail.length - maxEntries);
+        }
+      }
+
+      // Brightness: fade in after emission, lift with the particle's own
+      // bin, and sit a little lower overall when the music is quiet.
+      const bright = Math.min(1, this.ages[i] / T.fadeIn) * (0.55 + freqAmp * 0.45) * (0.6 + volume * 0.4);
+      this.brightness[i] = bright;
+
+      this.pointPositions[i3]     = px;
+      this.pointPositions[i3 + 1] = py;
+      this.pointPositions[i3 + 2] = pz;
+
+      const c = this._tmpColorParticle.lerpColors(this.outerColor, this.innerColor, freqAmp);
+      this.pointColors[i3]     = c.r * bright;
+      this.pointColors[i3 + 1] = c.g * bright;
+      this.pointColors[i3 + 2] = c.b * bright;
+
+      this.pointSizes[i] = (1.0 + freqAmp * 3.0) * bright;
     }
 
     // Zero out unused points
@@ -684,13 +866,12 @@ class MagneticParticles {
       const numPoints = trail.length / 3;
       if (numPoints < 2) continue;
 
-      const life = this.lifetimes[i];
-      const freqAmp = 0.5; // simplified for trail color
+      const bright = this.brightness[i];
 
       for (let j = 0; j < numPoints - 1 && vertIdx < maxVerts - 1; j++) {
         const j3 = j * 3;
-        const alphaA = (j / numPoints) * life;
-        const alphaB = ((j + 1) / numPoints) * life;
+        const alphaA = (j / numPoints) * bright;
+        const alphaB = ((j + 1) / numPoints) * bright;
 
         const vA = vertIdx * 3;
         const vB = (vertIdx + 1) * 3;
@@ -1394,9 +1575,13 @@ class Visualizer {
       this._updatePhysics(dt, this.audio);
     }
 
-    // Visual sync for cores (mesh transform + shader uniforms)
+    // Visual sync for cores (mesh transform + shader uniforms). Cores that
+    // die on this frame are handed to the particles for their burst.
+    const died = [];
     for (const core of this.cores) {
+      const wasAlive = core.alive;
       core.update(simTime, dt, this.audio);
+      if (wasAlive && !core.alive) died.push(core);
     }
 
     this._updateCamera(wallTime, dt);
@@ -1405,7 +1590,11 @@ class Visualizer {
     const hue = 0.6 + treble * 0.1;
     this.centralLight.color.setHSL(hue, 0.5, 0.5 + volume * 0.3);
 
-    this.particles.update(this.audio, dt);
+    this.particles.update(this.audio, dt, {
+      barycenter: this._barycenter,
+      extent: this._extent,
+      died,
+    });
 
     // Nebula
     this.nebula.update(this.audio);
