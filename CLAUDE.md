@@ -29,8 +29,8 @@ No build system, no bundler, no tests, no linter. Three.js 0.162 is loaded from 
 
 | Class | Role |
 |-------|------|
-| `AudioAnalyzer` | FFT analysis of real audio via Web Audio API (fftSize 2048). Band averages (bass / mid / treble / volume) with asymmetric smoothing (fast rise, slow decay), plus per-bin smoothed data for particles. |
-| `DemoAnalyzer` | Fake audio for demo mode, same interface as AudioAnalyzer. |
+| `AudioAnalyzer` | Web Audio FFT (fftSize 2048) plus the waveform. Bands by real frequency (bass 30-200 Hz, mid 200 Hz-2 kHz, treble 2-10 kHz, laid out from `ctx.sampleRate`), loudness from time-domain RMS. Each band normalizes against its own running peak (auto-leveler, ~30 s memory: it adapts to the source's level, not to a breakdown) so any source fills 0..1. Envelopes: 20 ms attack, 200 ms release (400 ms for loudness). Per-band onsets fire `getHit(band)`, which jumps to 1 and decays over ~250 ms. `getFreqAt(hz)` gives a particle its own leveled bin. Knobs in `AUDIO_TUNING`. |
+| `DemoAnalyzer` | Synthetic 120 BPM track (kick, snare on 2 and 4, off-beat hats, 8-bar pad swell, a breakdown every fourth phrase) written into the FFT bytes and waveform, then run through the same `_analyze` as live audio. |
 | `Core` | A planet. Has a `role` (`central`, `satellite` or `partner`), `mass`, `charge`, `radius`, lifecycle (`spawning -> alive -> collapsing -> dead`), and a custom GLSL shader (hot nucleus, halo, rim, drifting value-noise atmosphere). Physics state (`position`, `velocity`, `acceleration`) is integrated by the Visualizer, not by the Core. |
 | `MagneticParticles` | Up to 5000 particles that trace magnetic field lines. Every alive core is a monopole with its `effectiveCharge`; particles are emitted at positive cores, follow the summed field, and land on negative cores (if no positive core is alive the survivors emit outward instead). Dormant pool plus an emission budget: rate and speed follow volume, so streams thin out when quiet. Each particle's FFT bin drives brightness and a sideways shimmer. All motion is `dt`-scaled. Knobs live in `PARTICLE_TUNING`. Rendered as a `Points` cloud plus a `LineSegments` trail buffer. |
 | `Nebula` | 12 procedural sprite blobs with additive blending. Off by default, toggled with B. |
@@ -71,6 +71,17 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
 3. Use `F` (freeze) to inspect planets at rest
 4. Use `M`/`N` to verify changes look good across all visual modes
 5. Let it run through at least one full system lifecycle (a few minutes) to see a spawn, collapse and respawn
+6. Judge audio reactivity on a real track ("Load Audio File"), not only Demo Mode
+
+## What reacts to what
+
+- Bass envelope: planet glow, central light, gravity (`G` up to 1.3x)
+- Bass hit: planet flash and ~5% swell, light and bloom spike, a burst of particles from the sources
+- Mid envelope: planet glow (lightly)
+- Treble envelope: particle shimmer
+- Loudness (RMS): particle emission rate and speed, particle brightness floor, bloom, nebula opacity
+- Each particle's own frequency: its speed along the line and its brightness
+- Camera: nothing. It never reacts to audio
 
 ## Project tracker
 
@@ -81,6 +92,7 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
 - **Camera & composition**: single smooth drift around the barycenter, extent-aware framing, smooth-only rule
 - **Orbital dynamics**: cores rewritten as an n-body gravity sim with solar / binary / trinary system types and smooth barycenter handoff on collapse
 - **Field-line particles**: particles trace the monopole field from positive to negative cores, `dt`-scaled, with emission that thins out when quiet, collapse pull and death burst
+- **Audio analysis**: real-frequency bands, RMS loudness, auto-leveler, musical envelopes, per-band onsets with a decaying hit, log-spaced particle listeners, a demo track with beats and a breakdown
 - **UI polish**: help overlay, keyboard shortcuts, mode/palette cycling, overlay z-index fixes
 
 ### Open work areas
@@ -90,10 +102,9 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
    - A particle's trail vanishes with it on landing instead of draining into the core
    - Particles ignore `role` beyond the sign of the charge
 
-2. **Audio reactivity**: better mapping from sound to visuals
-   - Per-frequency-band response tuning (bass -> planets, mids -> particles, highs -> sparkle)
-   - Transient/onset detection for punctuation moments
-   - Dynamic range: quiet passages vs. loud passages should feel different
+2. **Audio feel**: tune `AUDIO_TUNING` on real tracks across genres (onset ratios, leveler memory, hit decay)
+   - Mid and treble hits are computed but nothing uses them yet (snare flash, hat sparkle)
+   - Palette or hue could follow the spectral balance
 
 3. **New visual effects**: expanding the visual vocabulary
    - New visual modes or shader experiments

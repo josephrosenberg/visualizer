@@ -29,24 +29,87 @@ const MODES = [
   { name: 'Dense',         coreVisible: true,  wireframe: false, metalness: 0.6, roughness: 0.3,  rayStyle: 'ribbon',  trailLen: 50, particleMul: 2.5 },
 ];
 
-// ─── Audio Analyzer ──────────────────────────────────────────────────────────
+// ─── Audio Analysis ──────────────────────────────────────────────────────────
+
+// Bands are real frequencies, loudness is time-domain RMS, and every band
+// normalizes against its own slowly decaying running peak (an auto-leveler)
+// so quiet and loud sources both use the full 0..1 range. Envelopes use
+// musical time constants, and per-band onsets fire a `hit` that jumps to 1
+// and decays. The hit is what the visuals punch on.
+//
+// These are the knobs to turn with a real track playing.
+const AUDIO_TUNING = {
+  fftSize:           2048,
+  analyserSmoothing: 0.5,    // the analyser's own smoothing; keep low, we smooth ourselves
+  bands: { bass: [30, 200], mid: [200, 2000], treble: [2000, 10000] }, // Hz
+  particleHz:        [40, 8000], // particles listen log-spaced across this range
+  attack:            0.02,   // s, envelope rise time constant
+  release:           0.20,   // s, band envelope fall time constant
+  loudRelease:       0.40,   // s, loudness fall time constant (the body, not the pumping)
+  levelerTau:        30,     // s, running-peak memory: adapts to the source, not to a breakdown
+  levelerFloor:      0.22,   // running peak never drops below this (raw 0..1)
+  noiseFloor:        0.10,   // raw band level treated as silence
+  rmsFloor:          0.02,   // running RMS peak never drops below this
+  onsetTau:          0.8,    // s, running-average memory for onset detection
+  onsetRatio:        { bass: 1.45, mid: 1.4, treble: 1.35 }, // level / average to count as a hit
+  onsetMinLevel:     0.25,   // leveled band must be at least this to hit
+  onsetRefractory:   0.12,   // s between hits in one band
+  hitTau:            0.09,   // s, hit decay time constant (~6% left after 250 ms)
+};
+
+const BAND_NAMES = ['bass', 'mid', 'treble'];
 
 class AudioAnalyzer {
   constructor() {
     this.ctx = null;
     this.analyser = null;
-    this.dataArray = null;
     this.source = null;
-    this.active = false;
-    this.smoothBass = 0;
-    this.smoothMid = 0;
-    this.smoothTreble = 0;
-    this.smoothVolume = 0;
-    this.smoothBins = null;  // smoothed per-bin FFT data
-    this.beat = false;
-    this.beatHeld = 0;
-    this.prevBassEnergy = 0;
     this.audioElement = null;
+    this.active = false;
+
+    this.sampleRate = 44100;
+    this.binCount = AUDIO_TUNING.fftSize / 2;
+    this.binHz = this.sampleRate / AUDIO_TUNING.fftSize;
+    this.dataArray = new Uint8Array(this.binCount);           // FFT bytes, 0..255
+    this.timeData = new Float32Array(AUDIO_TUNING.fftSize);   // waveform, -1..1
+    this.smoothBins = new Float32Array(this.binCount);        // per-bin envelope, 0..1
+    this.bandOfBin = new Uint8Array(this.binCount);           // index into BAND_NAMES
+    this.bandBins = {};                                       // name -> [lo, hi)
+
+    const perBand = (v) => ({ bass: v, mid: v, treble: v });
+    this.raw = perBand(0);                        // band mean this frame
+    this.peak = perBand(AUDIO_TUNING.levelerFloor); // decaying running peak
+    this.level = perBand(0);                      // raw normalized by peak
+    this.env = perBand(0);                        // level with attack/release
+    this.avg = perBand(0);                        // slow average of level, for onsets
+    this.prevLevel = perBand(0);
+    this.hit = perBand(0);                        // 1 on an onset, decays
+    this.sinceHit = perBand(99);
+
+    this.rms = 0;
+    this.rmsPeak = AUDIO_TUNING.rmsFloor;
+    this.loud = 0;
+
+    this._layoutBands();
+  }
+
+  _layoutBands() {
+    this.binHz = this.sampleRate / AUDIO_TUNING.fftSize;
+    const toBin = (hz) => Math.max(1, Math.min(this.binCount - 1, Math.round(hz / this.binHz)));
+    for (const name of BAND_NAMES) {
+      const [lo, hi] = AUDIO_TUNING.bands[name];
+      const a = toBin(lo);
+      this.bandBins[name] = [a, Math.max(a + 1, toBin(hi))];
+    }
+    // Every bin belongs to a band so a single bin can be normalized by that
+    // band's running peak (particles read bins, not bands).
+    for (let i = 0; i < this.binCount; i++) {
+      const hz = i * this.binHz;
+      let b = 2;
+      if (hz < AUDIO_TUNING.bands.bass[1]) b = 0;
+      else if (hz < AUDIO_TUNING.bands.mid[1]) b = 1;
+      this.bandOfBin[i] = b;
+    }
   }
 
   async captureSystemAudio() {
@@ -92,107 +155,153 @@ class AudioAnalyzer {
 
   _setupAnalyser() {
     this.analyser = this.ctx.createAnalyser();
-    this.analyser.fftSize = 2048;
-    this.analyser.smoothingTimeConstant = 0.82;
+    this.analyser.fftSize = AUDIO_TUNING.fftSize;
+    this.analyser.smoothingTimeConstant = AUDIO_TUNING.analyserSmoothing;
     this.source.connect(this.analyser);
-    this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-    this.smoothBins = new Float32Array(this.analyser.frequencyBinCount);
+    this.sampleRate = this.ctx.sampleRate;
+    this._layoutBands();
   }
 
-  update() {
+  update(dt) {
     if (!this.active || !this.analyser) return;
     this.analyser.getByteFrequencyData(this.dataArray);
+    this.analyser.getFloatTimeDomainData(this.timeData);
+    this._analyze(dt);
+  }
 
-    // Smooth per-bin frequency data
-    if (this.smoothBins) {
-      const binLerp = 0.12;
-      for (let i = 0; i < this.dataArray.length; i++) {
-        const raw = this.dataArray[i] / 255;
-        this.smoothBins[i] += (raw - this.smoothBins[i]) * binLerp;
+  // Shared by the live and demo analyzers: works from dataArray + timeData.
+  _analyze(dt) {
+    const T = AUDIO_TUNING;
+    const aUp = 1 - Math.exp(-dt / T.attack);
+    const aDown = 1 - Math.exp(-dt / T.release);
+    const aLoudDown = 1 - Math.exp(-dt / T.loudRelease);
+    const peakDecay = Math.exp(-dt / T.levelerTau);
+    const avgA = 1 - Math.exp(-dt / T.onsetTau);
+    const hitDecay = Math.exp(-dt / T.hitTau);
+    const data = this.dataArray;
+
+    // Per-bin envelopes for the particles
+    const bins = this.smoothBins;
+    for (let i = 0; i < this.binCount; i++) {
+      const r = data[i] / 255;
+      bins[i] += (r - bins[i]) * (r > bins[i] ? aUp : aDown);
+    }
+
+    // Loudness: RMS of the waveform against its own running peak
+    const td = this.timeData;
+    let sum = 0;
+    for (let i = 0; i < td.length; i++) sum += td[i] * td[i];
+    const rms = Math.sqrt(sum / td.length);
+    this.rms = rms;
+    this.rmsPeak = Math.max(rms, this.rmsPeak * peakDecay, T.rmsFloor);
+    const loudTarget = Math.min(1, rms / this.rmsPeak);
+    this.loud += (loudTarget - this.loud) * (loudTarget > this.loud ? aUp : aLoudDown);
+
+    for (const name of BAND_NAMES) {
+      const [lo, hi] = this.bandBins[name];
+      let s = 0;
+      for (let i = lo; i < hi; i++) s += data[i];
+      const raw = s / ((hi - lo) * 255);
+      this.raw[name] = raw;
+
+      // Auto-leveler: normalize by a running peak that forgets over levelerTau.
+      const peak = Math.max(raw, this.peak[name] * peakDecay, T.levelerFloor);
+      this.peak[name] = peak;
+      let level = (raw - T.noiseFloor) / (peak - T.noiseFloor);
+      level = level < 0 ? 0 : level > 1 ? 1 : level;
+      this.level[name] = level;
+
+      this.env[name] += (level - this.env[name]) * (level > this.env[name] ? aUp : aDown);
+
+      // Onset: a rising edge well above the recent average, not too soon
+      // after the last one.
+      this.sinceHit[name] += dt;
+      const avg = this.avg[name];
+      const rising = level > this.prevLevel[name];
+      if (rising && level > T.onsetMinLevel && level > avg * T.onsetRatio[name]
+          && this.sinceHit[name] > T.onsetRefractory) {
+        this.hit[name] = 1;
+        this.sinceHit[name] = 0;
+      } else {
+        this.hit[name] *= hitDecay;
       }
+      this.avg[name] = avg + (level - avg) * avgA;
+      this.prevLevel[name] = level;
     }
-
-    const len = this.dataArray.length;
-    let bass = 0, mid = 0, treble = 0, total = 0;
-    const bassEnd = Math.floor(len * 0.08);
-    const midEnd = Math.floor(len * 0.4);
-
-    for (let i = 0; i < len; i++) {
-      const v = this.dataArray[i] / 255;
-      total += v;
-      if (i < bassEnd) bass += v;
-      else if (i < midEnd) mid += v;
-      else treble += v;
-    }
-
-    bass /= bassEnd;
-    mid /= (midEnd - bassEnd);
-    treble /= (len - midEnd);
-    total /= len;
-
-    // Asymmetric smoothing: rise faster than decay so hits land but falloff is gentle
-    const bassUp = bass > this.smoothBass ? 0.12 : 0.05;
-    const midUp  = mid  > this.smoothMid  ? 0.14 : 0.06;
-    const trebUp = treble > this.smoothTreble ? 0.16 : 0.07;
-    const volUp  = total > this.smoothVolume  ? 0.12 : 0.05;
-    this.smoothBass = THREE.MathUtils.lerp(this.smoothBass, bass, bassUp);
-    this.smoothMid = THREE.MathUtils.lerp(this.smoothMid, mid, midUp);
-    this.smoothTreble = THREE.MathUtils.lerp(this.smoothTreble, treble, trebUp);
-    this.smoothVolume = THREE.MathUtils.lerp(this.smoothVolume, total, volUp);
-
-    const bassEnergy = bass;
-    const delta = bassEnergy - this.prevBassEnergy;
-    if (delta > 0.13 && bassEnergy > 0.35) {
-      this.beat = true;
-      this.beatHeld = 8;
-    } else {
-      this.beatHeld = Math.max(0, this.beatHeld - 1);
-      this.beat = this.beatHeld > 0;
-    }
-    this.prevBassEnergy = bassEnergy;
   }
 
-  // Get amplitude for a specific frequency bin (0..1)
-  getFreqBin(bin) {
-    if (!this.active || !this.smoothBins) return 0;
-    const idx = Math.min(bin, this.smoothBins.length - 1);
-    return this.smoothBins[idx];
+  // Level (0..1) of the bin nearest `hz`, relative to its band's running peak.
+  getFreqAt(hz) {
+    if (!this.active) return 0;
+    const bin = Math.max(0, Math.min(this.binCount - 1, Math.round(hz / this.binHz)));
+    const band = BAND_NAMES[this.bandOfBin[bin]];
+    const T = AUDIO_TUNING;
+    const v = (this.smoothBins[bin] - T.noiseFloor) / (this.peak[band] - T.noiseFloor);
+    return v < 0 ? 0 : v > 1 ? 1 : v;
   }
 
-  getBass()   { return this.active ? this.smoothBass : 0; }
-  getMid()    { return this.active ? this.smoothMid : 0; }
-  getTreble() { return this.active ? this.smoothTreble : 0; }
-  getVolume() { return this.active ? this.smoothVolume : 0; }
-  isBeat()    { return this.active ? this.beat : false; }
+  getBass()   { return this.active ? this.env.bass : 0; }
+  getMid()    { return this.active ? this.env.mid : 0; }
+  getTreble() { return this.active ? this.env.treble : 0; }
+  getVolume() { return this.active ? this.loud : 0; }
+  getHit(band = 'bass') { return this.active ? this.hit[band] : 0; }
+  isBeat()    { return this.getHit('bass') > 0.5; }
 }
 
 // ─── Demo Analyzer ───────────────────────────────────────────────────────────
 
+// A fake 120 BPM track written straight into the FFT bytes and the waveform
+// buffer, then run through the real analysis. Kick on every beat, snare on
+// 2 and 4, hats on the off-beats, a pad that swells over 8 bars, and a
+// breakdown every fourth phrase so quiet passages exist.
 class DemoAnalyzer extends AudioAnalyzer {
   constructor() {
     super();
     this.active = true;
     this.t = 0;
-    // Fake frequency data for per-particle FFT
-    this.dataArray = new Uint8Array(1024);
-    this.smoothBins = new Float32Array(1024);
   }
 
-  update() {
-    this.t += 0.016;
+  update(dt) {
+    this.t += dt;
     const t = this.t;
+    const beatLen = 0.5;                         // 120 BPM
+    const beat = Math.floor(t / beatLen);
+    const beatPhase = t - beat * beatLen;        // seconds into the beat
+    const beatInBar = beat % 4;
+    const bar = Math.floor(beat / 4);
+    const phrase = Math.floor(bar / 8);
+    const breakdown = (phrase % 4) === 3;
+    const swell = 0.5 - 0.5 * Math.cos((t / 16) * Math.PI * 2); // 0 at phrase start, 1 mid-phrase
 
-    this.smoothBass   = 0.3 + 0.35 * Math.sin(t * 1.2) * Math.sin(t * 0.4);
-    this.smoothMid    = 0.2 + 0.3  * Math.sin(t * 1.8 + 1) * Math.sin(t * 0.6);
-    this.smoothTreble = 0.15 + 0.2 * Math.sin(t * 2.5 + 2) * Math.sin(t * 0.8);
-    this.smoothVolume = (this.smoothBass + this.smoothMid + this.smoothTreble) / 3;
+    const kick = breakdown ? 0 : Math.exp(-beatPhase / 0.1);
+    const snare = (!breakdown && (beatInBar === 1 || beatInBar === 3)) ? Math.exp(-beatPhase / 0.11) : 0;
+    const offbeat = beatPhase >= beatLen / 2;
+    const eighth = offbeat ? beatPhase - beatLen / 2 : beatPhase;
+    const hat = offbeat ? Math.exp(-eighth / 0.035) * (breakdown ? 0.4 : 1) : 0;
+    const bassline = breakdown ? 0.25 : 0.55 + 0.25 * Math.sin(t * 2.5);
+    const pad = (breakdown ? 0.45 : 0.3) + 0.5 * swell;
+    const lead = (!breakdown && Math.sin(t * 0.37) > 0.2) ? 0.4 + 0.4 * Math.abs(Math.sin(t * 5.1)) : 0;
 
-    // Fill fake frequency bins with smooth oscillations
-    for (let i = 0; i < this.dataArray.length; i++) {
-      const freq = i / this.dataArray.length;
-      const wave = Math.sin(t * (1 + freq * 3) + i * 0.1) * 0.5 + 0.5;
-      this.smoothBins[i] += (wave - this.smoothBins[i]) * 0.08;
+    const data = this.dataArray;
+    for (let i = 0; i < this.binCount; i++) {
+      const hz = i * this.binHz;
+      let v = 0.08;                                            // floor hiss
+      if (hz < 150)        v += 0.35 * bassline + 0.55 * kick;
+      else if (hz < 400)   v += 0.2 * bassline + 0.25 * kick + 0.3 * snare + 0.1 * pad;
+      else if (hz < 2000)  v += 0.3 * pad + 0.35 * snare + 0.3 * lead;
+      else if (hz < 6000)  v += 0.1 * pad + 0.25 * snare + 0.35 * hat + 0.15 * lead;
+      else if (hz < 12000) v += 0.3 * hat + 0.1 * snare;
+      else                 v += 0.05 * hat;
+      v *= 1 - 0.00004 * hz;                                   // gentle spectral tilt
+      v += (Math.random() - 0.5) * 0.03;
+      data[i] = Math.max(0, Math.min(255, Math.round(v * 255)));
     }
+
+    const amp = 0.04 + 0.22 * (kick + 0.6 * snare + 0.35 * pad + 0.15 * hat + 0.25 * bassline);
+    const td = this.timeData;
+    for (let i = 0; i < td.length; i++) td[i] = amp * Math.sin(i * 0.11);
+
+    this._analyze(dt);
   }
 }
 
@@ -207,7 +316,7 @@ const PHYSICS_G = 1.4;
 
 const PLANET_VERTEX = /* glsl */ `
   uniform float uBass;
-  uniform float uBeat;
+  uniform float uHit;
 
   varying vec3 vNormal;
   varying vec3 vWorldPos;
@@ -230,7 +339,7 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform float uBass;
   uniform float uMid;
   uniform float uTreble;
-  uniform float uBeat;
+  uniform float uHit;
   uniform vec3 uColorCore;
   uniform vec3 uColorInner;
   uniform vec3 uColorOuter;
@@ -286,8 +395,8 @@ const PLANET_FRAGMENT = /* glsl */ `
             + vnoise(p * 4.3 + vec3(0.0, 0.0, t * 0.7)) * 0.1;
     float surface = smoothstep(0.25, 0.85, n);
 
-    // Audio-reactive pulse.
-    float pulse = 1.0 + uBass * 0.5 + uMid * 0.2;
+    // Audio-reactive pulse: the bass envelope carries the glow, a bass hit flashes it.
+    float pulse = 1.0 + uBass * 0.6 + uMid * 0.15 + uHit * 0.9;
     float sparkle = uTreble * 0.5;
 
     // Color stack: white-hot nucleus → palette inner glow → darker body → halo edge.
@@ -338,7 +447,7 @@ class Core {
       uBass:       { value: 0 },
       uMid:        { value: 0 },
       uTreble:     { value: 0 },
-      uBeat:       { value: 0 },
+      uHit:        { value: 0 },
       uColorCore:  { value: new THREE.Color(0x888899) },
       uColorInner: { value: new THREE.Color(0x6699ff) },
       uColorOuter: { value: new THREE.Color(0x2244aa) },
@@ -416,7 +525,9 @@ class Core {
 
     if (!this.alive) return;
 
-    this.mesh.scale.setScalar(Math.max(0.001, this.scaleT));
+    // A bass hit swells the body ~5% on top of its lifecycle scale.
+    const hit = audio.getHit('bass');
+    this.mesh.scale.setScalar(Math.max(0.001, this.scaleT) * (1 + hit * 0.05));
     this.mesh.position.copy(this.position);
     this.mesh.rotation.y += 0.005;
     this.mesh.rotation.x += 0.003;
@@ -425,7 +536,7 @@ class Core {
     this.uniforms.uBass.value = audio.getBass();
     this.uniforms.uMid.value = audio.getMid();
     this.uniforms.uTreble.value = audio.getTreble();
-    this.uniforms.uBeat.value = audio.getBass();
+    this.uniforms.uHit.value = hit;
   }
 
   destroy() {
@@ -456,13 +567,14 @@ class Core {
 // These are the knobs to turn while watching Demo Mode.
 const PARTICLE_TUNING = {
   speedBase:    1.6,   // cruise speed along a field line at silence
-  speedVolume:  2.2,   // extra speed per unit of volume
+  speedVolume:  1.8,   // extra speed per unit of volume
   poleBoost:    0.8,   // up to +80% speed where the field is strong (near a core)
   poleFieldRef: 0.5,   // |B| at which poleBoost saturates
   steer:        10,    // 1/s, how fast velocity turns toward the field line
   rateBase:     0.05,  // emission at silence, as a fraction of count per second
-  rateVolume:   0.7,   // extra emission per unit of volume
+  rateVolume:   0.45,  // extra emission per unit of volume
   maxBurst:     0.05,  // cap on emissions per frame, as a fraction of count
+  hitBurst:     0.08,  // extra emission on a bass hit, as a fraction of count
   shimmer:      0.6,   // sideways wobble speed driven by the particle's FFT bin
   fadeIn:       0.25,  // seconds to full brightness after emission
   maxAge:       10,    // seconds before a particle is recycled regardless
@@ -485,6 +597,7 @@ class MagneticParticles {
     this.rayStyle = 'ribbon';
     this.t = 0;
     this.emitBudget = 0;
+    this._lastHit = 0;
 
     // Per-particle state. Everything starts dormant (hidden) and is released
     // through the emission budget, so streams build up over the first second.
@@ -496,12 +609,15 @@ class MagneticParticles {
     this.ages = new Float32Array(n);
     this.kicks = new Float32Array(n);     // seconds of reduced steering left after a burst
     this.brightness = new Float32Array(n);
-    this.freqBins = new Uint16Array(n);   // which FFT bin each particle responds to
+    this.listenHz = new Float32Array(n);  // the frequency each particle listens to
     this.phases = new Float32Array(n);    // shimmer phase offset
     this.trails = [];                     // per-particle position history (flat xyz)
 
     for (let i = 0; i < n; i++) {
-      this.freqBins[i] = Math.floor(Math.random() * 1024);
+      // Log-spaced so every octave has listeners. Uniform bins would put
+      // most particles above 4 kHz, where music has almost nothing.
+      const [loHz, hiHz] = AUDIO_TUNING.particleHz;
+      this.listenHz[i] = loHz * Math.pow(hiHz / loHz, Math.random());
       this.phases[i] = Math.random() * Math.PI * 2;
       this.trails[i] = [];
     }
@@ -711,6 +827,11 @@ class MagneticParticles {
     this.emitBudget = Math.min(this.emitBudget + rate * dt, this.count * T.maxBurst);
     const canEmit = this._emitTotal > 0.0001;
 
+    // A bass hit releases a burst from the sources on its rising edge.
+    const hitBass = audio.getHit('bass');
+    if (hitBass > 0.6 && this._lastHit <= 0.6) this.emitBudget += this.count * T.hitBurst;
+    this._lastHit = hitBass;
+
     const speed = T.speedBase + volume * T.speedVolume;
     const steerBase = Math.min(1, dt * T.steer);
     const shimmerT = this.t * 6;
@@ -773,11 +894,14 @@ class MagneticParticles {
       // field is strong so lines rush in and out of the poles.
       const inv = this.flowDir[i] / fmag;
       const ux = fx * inv, uy = fy * inv, uz = fz * inv;
-      const s = speed * (1 + Math.min(1, fmag / T.poleFieldRef) * T.poleBoost);
+
+      // The particle's own frequency sets how hard it's driven: listeners on
+      // a hot bin rush along the line, listeners on a dead bin crawl.
+      const freqAmp = audio.getFreqAt(this.listenHz[i]);
+      const s = speed * (0.55 + 0.9 * freqAmp) * (1 + Math.min(1, fmag / T.poleFieldRef) * T.poleBoost);
 
       // Shimmer: a small wobble perpendicular to the line, sized by this
       // particle's FFT bin and the treble so highs make the arcs sparkle.
-      const freqAmp = audio.getFreqBin(this.freqBins[i]);
       let qx = uz, qy = 0, qz = -ux;
       let ql = Math.sqrt(qx * qx + qz * qz);
       if (ql < 0.1) { qx = 0; qy = uz; qz = -uy; ql = Math.sqrt(qy * qy + qz * qz) || 1; }
@@ -1253,7 +1377,7 @@ class Visualizer {
   // particle <-> core interaction (handled in MagneticParticles.update).
   _updatePhysics(dt, audio) {
     const bass = audio.getBass();
-    const G = PHYSICS_G * (1.0 + bass * 0.4);
+    const G = PHYSICS_G * (1.0 + bass * 0.3);
     // Very light damping (~0.2%/sec) — bleeds chaos but preserves orbits over
     // the body's full lifespan.
     const damping = Math.pow(0.998, dt);
@@ -1554,7 +1678,7 @@ class Visualizer {
     const rawDt = this.clock.getDelta();
     const dt = Math.min(rawDt, 1 / 30);
     const wallTime = this.clock.elapsedTime;
-    this.audio.update();
+    this.audio.update(dt);
 
     let simTime;
     if (this.frozen) {
@@ -1586,7 +1710,8 @@ class Visualizer {
 
     this._updateCamera(wallTime, dt);
 
-    this.centralLight.intensity = 2.5 + bass * 4.0 + volume * 2.0;
+    const hit = this.audio.getHit('bass');
+    this.centralLight.intensity = 2.0 + bass * 3.0 + hit * 3.0 + volume * 1.5;
     const hue = 0.6 + treble * 0.1;
     this.centralLight.color.setHSL(hue, 0.5, 0.5 + volume * 0.3);
 
@@ -1603,7 +1728,7 @@ class Visualizer {
     this.starfield.rotation.y += 0.00008;
 
     // Bloom reacts to volume
-    this.bloomPass.strength = 0.9 + volume * 1.2;
+    this.bloomPass.strength = 0.7 + volume * 0.9 + hit * 0.5;
 
     this.composer.render();
   }
