@@ -314,6 +314,11 @@ const PHYSICS_G = 1.4;
 
 // ─── Core (Planet with shader-based surface) ─────────────────────────────────
 
+// Recent surface events per planet (flare spots, landings, bounces), drawn by
+// the fragment shader as rings. Stored in object space so they rotate with
+// the body.
+const MAX_SURFACE_EVENTS = 32;
+
 const PLANET_VERTEX = /* glsl */ `
   uniform float uBass;
   uniform float uHit;
@@ -321,9 +326,11 @@ const PLANET_VERTEX = /* glsl */ `
   varying vec3 vNormal;
   varying vec3 vWorldPos;
   varying vec3 vViewDir;
+  varying vec3 vObjNormal;
 
   void main() {
     vec3 pos = position;
+    vObjNormal = normal;
 
     vec4 worldPos = modelMatrix * vec4(pos, 1.0);
     vWorldPos = worldPos.xyz;
@@ -335,6 +342,8 @@ const PLANET_VERTEX = /* glsl */ `
 `;
 
 const PLANET_FRAGMENT = /* glsl */ `
+  #define MAX_EVENTS ${MAX_SURFACE_EVENTS}
+
   uniform float uTime;
   uniform float uBass;
   uniform float uMid;
@@ -345,10 +354,13 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform vec3 uColorOuter;
   uniform float uMetalness;
   uniform float uRoughness;
+  uniform vec4 uEvents[MAX_EVENTS];      // xyz: object-space direction, w: start time
+  uniform float uEventKinds[MAX_EVENTS]; // 0 flare spot, 1 ripple
 
   varying vec3 vNormal;
   varying vec3 vWorldPos;
   varying vec3 vViewDir;
+  varying vec3 vObjNormal;
 
   // Hash-based 3D value noise — cheap, good enough for atmospheric texture.
   float hash3(vec3 p) {
@@ -412,6 +424,34 @@ const PLANET_FRAGMENT = /* glsl */ `
     color += rimCol * rim * pulse * 0.9;
     color += uColorInner * sparkle * surface * 0.4;
 
+    // Surface events: flare spots bloom out fast and bright, ripples expand
+    // like raindrops over about a second. Measured as angle on the sphere.
+    vec3 on = normalize(vObjNormal);
+    float flare = 0.0;
+    float ripple = 0.0;
+    for (int i = 0; i < MAX_EVENTS; i++) {
+      vec4 e = uEvents[i];
+      float age = uTime - e.w;
+      if (age < 0.0 || age > 1.2) continue;
+      float c = dot(on, e.xyz);
+      if (c < 0.85) continue;                  // more than ~0.55 rad away
+      float ang = acos(clamp(c, -1.0, 1.0));
+      if (uEventKinds[i] < 0.5) {
+        float life = clamp(age / 0.35, 0.0, 1.0);
+        float r = 0.04 + life * 0.22;
+        float band = 1.0 - smoothstep(0.0, 0.05, abs(ang - r));
+        float fill = (1.0 - smoothstep(0.0, r, ang)) * 0.5;
+        flare += (band + fill) * (1.0 - life) * (1.0 - life);
+      } else {
+        float life = clamp(age / 1.0, 0.0, 1.0);
+        float r = 0.02 + life * 0.3;
+        float band = 1.0 - smoothstep(0.0, 0.035, abs(ang - r));
+        ripple += band * (1.0 - life) * (1.0 - life);
+      }
+    }
+    color += uColorInner * flare * 2.5 * pulse;
+    color += mix(uColorInner, vec3(1.0), 0.4) * ripple * 1.2;
+
     gl_FragColor = vec4(color, 1.0);
   }
 `;
@@ -439,6 +479,16 @@ class Core {
     this.collapseDuration = 2.5 + Math.random() * 1.5;
     this.scaleT = 0;
 
+    // Ring buffer of surface events for the shader; start times far in the
+    // past so empty slots never draw.
+    this.surfaceEvents = new Float32Array(MAX_SURFACE_EVENTS * 4);
+    this.surfaceKinds = new Float32Array(MAX_SURFACE_EVENTS);
+    for (let k = 0; k < MAX_SURFACE_EVENTS; k++) this.surfaceEvents[k * 4 + 3] = -1000;
+    this.surfaceHead = 0;
+    this.lastRipple = -1000;
+    this._tmpVec = new THREE.Vector3();
+    this._tmpQuat = new THREE.Quaternion();
+
     const geo = new THREE.IcosahedronGeometry(this.radius, 4);
     this.geometry = geo;
 
@@ -453,6 +503,8 @@ class Core {
       uColorOuter: { value: new THREE.Color(0x2244aa) },
       uMetalness:  { value: 0.85 },
       uRoughness:  { value: 0.15 },
+      uEvents:     { value: this.surfaceEvents },
+      uEventKinds: { value: this.surfaceKinds },
     };
 
     this.material = new THREE.ShaderMaterial({
@@ -492,6 +544,25 @@ class Core {
   // off to the survivors instead of vanishing on the death frame.
   get effectiveCharge() {
     return this.charge * this.scaleT;
+  }
+
+  // Register a surface event at world point (x, y, z): 0 = flare spot,
+  // 1 = ripple (a landing or a bounce). Ripples are throttled so a busy sink
+  // shows a patter instead of a smear.
+  addSurfaceEvent(x, y, z, kind, time) {
+    if (kind === 1) {
+      if (time - this.lastRipple < 0.03) return;
+      this.lastRipple = time;
+    }
+    const v = this._tmpVec.set(x - this.position.x, y - this.position.y, z - this.position.z);
+    v.applyQuaternion(this._tmpQuat.copy(this.mesh.quaternion).invert()).normalize();
+    const k = this.surfaceHead * 4;
+    this.surfaceEvents[k]     = v.x;
+    this.surfaceEvents[k + 1] = v.y;
+    this.surfaceEvents[k + 2] = v.z;
+    this.surfaceEvents[k + 3] = time;
+    this.surfaceKinds[this.surfaceHead] = kind;
+    this.surfaceHead = (this.surfaceHead + 1) % MAX_SURFACE_EVENTS;
   }
 
   // Pure lifecycle + visual sync. Physics is driven externally by the Visualizer.
@@ -558,33 +629,57 @@ class Core {
 
 // ─── Magnetic Particle System ────────────────────────────────────────────────
 
-// Particles trace magnetic field lines. Every alive core is a monopole with
-// its effectiveCharge; the field at a point is the sum of q * r / |r|^3 over
-// cores. Positive cores are sources, negative cores are sinks, so a particle
-// born at a positive core streams along the field and lands on a negative one.
+// Particles are thrown off a source core, mostly on bass hits, with a launch
+// energy set by their own frequency. Near the source they're ballistic under
+// its gravity: low energy rises, bounces once and lands; high energy clears a
+// couple of radii, where the magnetic field takes over. Every alive core is a
+// monopole with its effectiveCharge and the field is the sum of q * r / |r|^3,
+// so escapees stream from positive cores to negative ones and land there.
 //
 // All speeds are scene units per second, rates are particles per second.
 // These are the knobs to turn while watching Demo Mode.
 const PARTICLE_TUNING = {
-  speedBase:    1.6,   // cruise speed along a field line at silence
-  speedVolume:  1.8,   // extra speed per unit of volume
-  poleBoost:    0.8,   // up to +80% speed where the field is strong (near a core)
-  poleFieldRef: 0.5,   // |B| at which poleBoost saturates
-  steer:        10,    // 1/s, how fast velocity turns toward the field line
-  rateBase:     0.05,  // emission at silence, as a fraction of count per second
-  rateVolume:   0.45,  // extra emission per unit of volume
-  maxBurst:     0.05,  // cap on emissions per frame, as a fraction of count
-  hitBurst:     0.08,  // extra emission on a bass hit, as a fraction of count
-  shimmer:      0.6,   // sideways wobble speed driven by the particle's FFT bin
-  fadeIn:       0.25,  // seconds to full brightness after emission
-  maxAge:       10,    // seconds before a particle is recycled regardless
-  pullRadii:    4,     // a collapsing core pulls particles from this many radii out
-  pullStrength: 7,     // inward speed added at full collapse, at the core
-  burstSpeed:   8,     // outward impulse when a core dies
-  burstRadii:   2.5,   // particles within this many radii of a dying core get it
-  kickDecay:    1.2,   // seconds for a burst to hand control back to the field
-  boundaryMult: 2.2,   // lines that escape past this many extents recycle
-  boundaryMin:  12,    // ...but never closer than this
+  // Emission
+  trickleBase:   0.02,  // steady emission at silence, fraction of count per second
+  trickleVolume: 0.15,  // extra steady emission per unit of loudness
+  trickleCap:    0.05,  // cap on trickle emissions per frame, fraction of count
+  hitBurst:      0.10,  // burst on a bass hit at full bass level, fraction of count
+  hitBurstMin:   0.3,   // a soft kick still throws this fraction of hitBurst
+  burstCap:      0.06,  // cap on burst emissions per frame, fraction of count
+  spotsMin:      2,     // flare spots per source per hit
+  spotsMax:      4,
+  spotSpread:    0.26,  // radians of scatter around a flare spot
+  // Launch
+  launchMin:     1.2,   // speed at zero energy
+  launchMax:     6.5,   // speed at full energy
+  launchSpread:  0.15,  // sideways speed as a fraction of launch speed
+  srcGravity:    6.0,   // escape speed off any surface = sqrt(2 * srcGravity), ~3.5
+  restitution:   0.35,  // one bounce before landing
+  bounceMin:     0.8,   // impacts slower than this just land
+  escapeInner:   1.4,   // radii: the field starts taking over
+  escapeOuter:   2.4,   // radii: fully on the field, source gravity off
+  // Field flight
+  speedBase:     1.6,   // cruise speed along a field line at silence
+  speedVolume:   1.8,   // extra speed per unit of volume
+  poleBoost:     0.8,   // up to +80% speed where the field is strong (near a core)
+  poleFieldRef:  0.5,   // |B| at which poleBoost saturates
+  steer:         10,    // 1/s, how fast velocity turns toward the field line
+  shimmer:       0.6,   // sideways wobble speed driven by the particle's FFT bin
+  fadeIn:        0.12,  // seconds to full brightness after emission
+  maxAge:        10,    // seconds before a particle is recycled regardless
+  boundaryMult:  2.2,   // lines that escape past this many extents recycle
+  boundaryMin:   12,    // ...but never closer than this
+  // Collapse
+  pullRadii:     4,     // a collapsing core pulls particles from this many radii out
+  pullStrength:  7,     // inward speed added at full collapse, at the core
+  burstSpeed:    8,     // outward impulse when a core dies
+  burstRadii:    2.5,   // particles within this many radii of a dying core get it
+  kickDecay:     1.2,   // seconds for a burst to hand control back to the field
+};
+
+const smoothstep01 = (a, b, x) => {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
 };
 
 class MagneticParticles {
@@ -596,16 +691,24 @@ class MagneticParticles {
     this.trailLength = 30;
     this.rayStyle = 'ribbon';
     this.t = 0;
-    this.emitBudget = 0;
+    this.emitBudget = 0;     // trickle
+    this.burstBudget = 0;    // hit bursts, from flare spots
     this._lastHit = 0;
+    this._burstBoost = 0;
+    this._spotsByCore = new Map(); // Core -> flat [x,y,z,...] world directions
+    this._dir = [0, 0, 0];
 
     // Per-particle state. Everything starts dormant (hidden) and is released
-    // through the emission budget, so streams build up over the first second.
+    // through the emission budgets, so streams build up over the first second.
     const n = this.maxCount;
     this.positions = new Float32Array(n * 3);
     this.velocities = new Float32Array(n * 3);
     this.active = new Uint8Array(n);      // 0 dormant (hidden), 1 in flight
     this.flowDir = new Int8Array(n);      // +1 follows B, -1 follows -B
+    this.escaped = new Uint8Array(n);     // 0 ballistic near the source, 1 on the field
+    this.bounced = new Uint8Array(n);     // one bounce allowed before landing
+    this.energy = new Float32Array(n);    // launch energy 0..1, from the particle's frequency
+    this.sourceCore = new Array(n).fill(null);
     this.ages = new Float32Array(n);
     this.kicks = new Float32Array(n);     // seconds of reduced steering left after a burst
     this.brightness = new Float32Array(n);
@@ -740,27 +843,48 @@ class MagneticParticles {
     return this._emitters[this._emitters.length - 1];
   }
 
-  // Release a dormant particle just above a core's surface, heading outward.
-  _emit(i, core) {
-    const i3 = i * 3;
+  // Uniform random unit vector into this._dir.
+  _randomDir() {
     const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
-    const nx = Math.sin(phi) * Math.cos(theta);
-    const ny = Math.sin(phi) * Math.sin(theta);
-    const nz = Math.cos(phi);
-    const r = core.radius * Math.max(core.scaleT, 0.05) * (1.03 + Math.random() * 0.12);
+    const z = 2 * Math.random() - 1;
+    const s = Math.sqrt(1 - z * z);
+    this._dir[0] = s * Math.cos(theta);
+    this._dir[1] = s * Math.sin(theta);
+    this._dir[2] = z;
+    return this._dir;
+  }
+
+  // Launch energy from the particle's own listener at this instant, plus a
+  // little extra on a hit. Hot bins escape, quiet bins bounce and fall back.
+  _launchEnergy(i, audio, boost) {
+    const amp = audio.getFreqAt(this.listenHz[i]);
+    const e = amp * 0.85 + boost + (Math.random() - 0.5) * 0.2;
+    return e < 0 ? 0 : e > 1 ? 1 : e;
+  }
+
+  // Release a dormant particle off a core's surface at direction n (unit),
+  // moving outward at a speed set by its energy, carried along with the core.
+  _emit(i, core, nx, ny, nz, energy) {
+    const T = PARTICLE_TUNING;
+    const i3 = i * 3;
+    const r = core.radius * Math.max(core.scaleT, 0.05) * 1.02;
 
     this.positions[i3]     = core.position.x + nx * r;
     this.positions[i3 + 1] = core.position.y + ny * r;
     this.positions[i3 + 2] = core.position.z + nz * r;
 
-    const s = PARTICLE_TUNING.speedBase;
-    this.velocities[i3]     = nx * s;
-    this.velocities[i3 + 1] = ny * s;
-    this.velocities[i3 + 2] = nz * s;
+    const v0 = T.launchMin + energy * (T.launchMax - T.launchMin);
+    const sp = v0 * T.launchSpread * 2;
+    this.velocities[i3]     = core.velocity.x + nx * v0 + (Math.random() - 0.5) * sp;
+    this.velocities[i3 + 1] = core.velocity.y + ny * v0 + (Math.random() - 0.5) * sp;
+    this.velocities[i3 + 2] = core.velocity.z + nz * v0 + (Math.random() - 0.5) * sp;
 
     this.active[i] = 1;
     this.flowDir[i] = core.effectiveCharge >= 0 ? 1 : -1;
+    this.escaped[i] = 0;
+    this.bounced[i] = 0;
+    this.energy[i] = energy;
+    this.sourceCore[i] = core;
     this.ages[i] = 0;
     this.kicks[i] = 0;
     this.brightness[i] = 0;
@@ -801,19 +925,58 @@ class MagneticParticles {
       this.velocities[i3 + 1] = oy * s;
       this.velocities[i3 + 2] = oz * s;
       this.kicks[i] = T.kickDecay;
+      this.escaped[i] = 1;
     }
   }
 
-  // ctx: { barycenter: Vector3, extent: number, died: Core[] }
+  // On a bass hit every source grows a few flare spots; the burst erupts from
+  // those, and each spot flashes a ring on the surface.
+  _flare(audio, time) {
+    const T = PARTICLE_TUNING;
+    const bassLevel = audio.getBass();
+    this.burstBudget += this.count * T.hitBurst * (T.hitBurstMin + (1 - T.hitBurstMin) * bassLevel);
+    this._burstBoost = 0.25 * bassLevel;
+    this._spotsByCore.clear();
+    for (const c of this._emitters) {
+      const n = T.spotsMin + Math.floor(Math.random() * (T.spotsMax - T.spotsMin + 1));
+      const r = c.radius * Math.max(c.scaleT, 0.05);
+      const spots = [];
+      for (let k = 0; k < n; k++) {
+        const d = this._randomDir();
+        spots.push(d[0], d[1], d[2]);
+        c.addSurfaceEvent(c.position.x + d[0] * r, c.position.y + d[1] * r, c.position.z + d[2] * r, 0, time);
+      }
+      this._spotsByCore.set(c, spots);
+    }
+  }
+
+  // Direction for a burst particle: a spot of this core, scattered.
+  _spotDir(core) {
+    const T = PARTICLE_TUNING;
+    const spots = this._spotsByCore.get(core);
+    const d = this._dir;
+    if (!spots || spots.length === 0) return this._randomDir();
+    const k = Math.floor(Math.random() * (spots.length / 3)) * 3;
+    d[0] = spots[k]     + (Math.random() - 0.5) * 2 * T.spotSpread;
+    d[1] = spots[k + 1] + (Math.random() - 0.5) * 2 * T.spotSpread;
+    d[2] = spots[k + 2] + (Math.random() - 0.5) * 2 * T.spotSpread;
+    const l = Math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) || 1;
+    d[0] /= l; d[1] /= l; d[2] /= l;
+    return d;
+  }
+
+  // ctx: { barycenter: Vector3, extent: number, died: Core[], time: number }
   update(audio, dt, ctx) {
     const T = PARTICLE_TUNING;
     const volume = audio.getVolume();
     const treble = audio.getTreble();
+    const time = ctx.time;
     this.t += dt;
 
     const alive = [];
     for (const c of this.cores) if (c.alive) alive.push(c);
     this._buildEmitters(alive);
+    const canEmit = this._emitTotal > 0.0001;
 
     for (const core of ctx.died) this._burst(core);
 
@@ -821,16 +984,18 @@ class MagneticParticles {
     const boundary = Math.max(T.boundaryMin, ctx.extent * T.boundaryMult);
     const boundarySq = boundary * boundary;
 
-    // Emission budget: fractional particles accumulate across frames, capped
+    // Trickle budget: fractional particles accumulate across frames, capped
     // so a stalled tab can't dump the whole pool in one frame when it resumes.
-    const rate = this.count * (T.rateBase + volume * T.rateVolume);
-    this.emitBudget = Math.min(this.emitBudget + rate * dt, this.count * T.maxBurst);
-    const canEmit = this._emitTotal > 0.0001;
+    const rate = this.count * (T.trickleBase + volume * T.trickleVolume);
+    this.emitBudget = Math.min(this.emitBudget + rate * dt, this.count * T.trickleCap);
 
-    // A bass hit releases a burst from the sources on its rising edge.
+    // Burst budget: a bass hit on its rising edge.
     const hitBass = audio.getHit('bass');
-    if (hitBass > 0.6 && this._lastHit <= 0.6) this.emitBudget += this.count * T.hitBurst;
+    if (hitBass > 0.6 && this._lastHit <= 0.6 && canEmit) this._flare(audio, time);
     this._lastHit = hitBass;
+    if (!canEmit) this.burstBudget = 0;
+    const burstCap = this.count * T.burstCap;
+    let burstThisFrame = 0;
 
     const speed = T.speedBase + volume * T.speedVolume;
     const steerBase = Math.min(1, dt * T.steer);
@@ -840,8 +1005,16 @@ class MagneticParticles {
       const i3 = i * 3;
 
       if (!this.active[i]) {
-        if (canEmit && this.emitBudget >= 1) {
-          this._emit(i, this._pickEmitter());
+        if (canEmit && this.burstBudget >= 1 && burstThisFrame < burstCap) {
+          const core = this._pickEmitter();
+          const d = this._spotDir(core);
+          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, this._burstBoost));
+          this.burstBudget -= 1;
+          burstThisFrame++;
+        } else if (canEmit && this.emitBudget >= 1) {
+          const core = this._pickEmitter();
+          const d = this._randomDir();
+          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, 0));
           this.emitBudget -= 1;
         } else {
           this.pointSizes[i] = 0;
@@ -852,12 +1025,15 @@ class MagneticParticles {
       let px = this.positions[i3], py = this.positions[i3 + 1], pz = this.positions[i3 + 2];
       let vx = this.velocities[i3], vy = this.velocities[i3 + 1], vz = this.velocities[i3 + 2];
       const age = this.ages[i];
+      const src = this.escaped[i] ? null : this.sourceCore[i];
 
-      // Field at p, plus the collapse pull, plus surface contact.
+      // Field at p, plus the collapse pull, plus surface contact. The
+      // particle's own source is handled separately while it's ballistic.
       let fx = 0, fy = 0, fz = 0;
       let pullX = 0, pullY = 0, pullZ = 0;
-      let absorbed = false;
+      let absorbedBy = null;
       for (const core of alive) {
+        if (core === src) continue;
         const dx = px - core.position.x;
         const dy = py - core.position.y;
         const dz = pz - core.position.z;
@@ -868,7 +1044,7 @@ class MagneticParticles {
         // its collapse doesn't absorb: it hoards particles at its center so
         // there's something to release when it dies.
         const surface = core.radius * Math.max(core.scaleT, 0.05);
-        if (d2 < surface * surface && age > 0.05 && ct < 0.3) { absorbed = true; break; }
+        if (d2 < surface * surface && age > 0.05 && ct < 0.3) { absorbedBy = core; break; }
 
         const d = Math.sqrt(d2 + 0.05);
         const q = core.effectiveCharge / (d * d * d);
@@ -886,39 +1062,94 @@ class MagneticParticles {
           }
         }
       }
+      if (absorbedBy) {
+        absorbedBy.addSurfaceEvent(px, py, pz, 1, time);
+        this._sleep(i);
+        continue;
+      }
 
-      const fmag = Math.sqrt(fx * fx + fy * fy + fz * fz);
-      if (absorbed || fmag < 1e-6) { this._sleep(i); continue; }
+      // Ballistic phase: the source's gravity, a bounce, a landing, or escape.
+      let gx = 0, gy = 0, gz = 0;
+      let onField = 1;
+      if (src) {
+        if (!src.alive) {
+          this.escaped[i] = 1;
+        } else {
+          const dx = px - src.position.x;
+          const dy = py - src.position.y;
+          const dz = pz - src.position.z;
+          const d2 = dx * dx + dy * dy + dz * dz;
+          const d = Math.sqrt(d2) + 1e-6;
+          const r = src.radius * Math.max(src.scaleT, 0.05);
+          onField = smoothstep01(T.escapeInner, T.escapeOuter, d / r);
+          if (onField >= 1) {
+            this.escaped[i] = 1;
+          } else {
+            const a = T.srcGravity * r / Math.max(d2, r * r * 0.25) * (1 - onField);
+            gx = -dx / d * a;
+            gy = -dy / d * a;
+            gz = -dz / d * a;
 
-      // Unit flow direction along (or against) the field, faster where the
-      // field is strong so lines rush in and out of the poles.
-      const inv = this.flowDir[i] / fmag;
-      const ux = fx * inv, uy = fy * inv, uz = fz * inv;
+            if (d < r && age > 0.03) {
+              const nx = dx / d, ny = dy / d, nz = dz / d;
+              // Impact speed relative to the moving surface
+              const vr = (vx - src.velocity.x) * nx + (vy - src.velocity.y) * ny + (vz - src.velocity.z) * nz;
+              if (!this.bounced[i] && -vr > T.bounceMin) {
+                const k = (1 + T.restitution) * vr;
+                vx -= k * nx;
+                vy -= k * ny;
+                vz -= k * nz;
+                px = src.position.x + nx * r * 1.01;
+                py = src.position.y + ny * r * 1.01;
+                pz = src.position.z + nz * r * 1.01;
+                this.bounced[i] = 1;
+                src.addSurfaceEvent(px, py, pz, 1, time);
+              } else {
+                src.addSurfaceEvent(px, py, pz, 1, time);
+                this._sleep(i);
+                continue;
+              }
+            }
+          }
+        }
+      }
 
-      // The particle's own frequency sets how hard it's driven: listeners on
-      // a hot bin rush along the line, listeners on a dead bin crawl.
+      // Flight along the field: unit flow direction along (or against) the
+      // field, faster where the field is strong so lines rush in and out of
+      // the poles, and faster for particles whose own frequency is hot.
       const freqAmp = audio.getFreqAt(this.listenHz[i]);
-      const s = speed * (0.55 + 0.9 * freqAmp) * (1 + Math.min(1, fmag / T.poleFieldRef) * T.poleBoost);
+      const fmag = Math.sqrt(fx * fx + fy * fy + fz * fz);
+      let tx = pullX, ty = pullY, tz = pullZ;
+      if (fmag > 1e-6) {
+        const inv = this.flowDir[i] / fmag;
+        const ux = fx * inv, uy = fy * inv, uz = fz * inv;
+        const s = speed * (0.55 + 0.9 * freqAmp) * (1 + Math.min(1, fmag / T.poleFieldRef) * T.poleBoost);
 
-      // Shimmer: a small wobble perpendicular to the line, sized by this
-      // particle's FFT bin and the treble so highs make the arcs sparkle.
-      let qx = uz, qy = 0, qz = -ux;
-      let ql = Math.sqrt(qx * qx + qz * qz);
-      if (ql < 0.1) { qx = 0; qy = uz; qz = -uy; ql = Math.sqrt(qy * qy + qz * qz) || 1; }
-      const sh = T.shimmer * freqAmp * (0.3 + treble) * Math.sin(shimmerT + this.phases[i]) / ql;
+        // Shimmer: a small wobble perpendicular to the line, sized by this
+        // particle's FFT bin and the treble so highs make the arcs sparkle.
+        let qx = uz, qy = 0, qz = -ux;
+        let ql = Math.sqrt(qx * qx + qz * qz);
+        if (ql < 0.1) { qx = 0; qy = uz; qz = -uy; ql = Math.sqrt(qy * qy + qz * qz) || 1; }
+        const sh = T.shimmer * freqAmp * (0.3 + treble) * Math.sin(shimmerT + this.phases[i]) / ql;
 
-      const tx = ux * s + qx * sh + pullX;
-      const ty = uy * s + qy * sh + pullY;
-      const tz = uz * s + qz * sh + pullZ;
+        tx += ux * s + qx * sh;
+        ty += uy * s + qy * sh;
+        tz += uz * s + qz * sh;
+      } else if (!src) {
+        // No field and no source to fall back to: nothing to follow.
+        this._sleep(i);
+        continue;
+      }
 
-      let steer = steerBase;
+      // Steering is off while ballistic and fades in across the escape zone.
+      let steer = steerBase * onField;
       if (this.kicks[i] > 0) {
         steer *= 0.15;
         this.kicks[i] -= dt;
       }
-      vx += (tx - vx) * steer;
-      vy += (ty - vy) * steer;
-      vz += (tz - vz) * steer;
+      vx += gx * dt + (tx - vx) * steer;
+      vy += gy * dt + (ty - vy) * steer;
+      vz += gz * dt + (tz - vz) * steer;
 
       px += vx * dt;
       py += vy * dt;
@@ -1719,6 +1950,7 @@ class Visualizer {
       barycenter: this._barycenter,
       extent: this._extent,
       died,
+      time: simTime,
     });
 
     // Nebula

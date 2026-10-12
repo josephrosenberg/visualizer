@@ -31,8 +31,8 @@ No build system, no bundler, no tests, no linter. Three.js 0.162 is loaded from 
 |-------|------|
 | `AudioAnalyzer` | Web Audio FFT (fftSize 2048) plus the waveform. Bands by real frequency (bass 30-200 Hz, mid 200 Hz-2 kHz, treble 2-10 kHz, laid out from `ctx.sampleRate`), loudness from time-domain RMS. Each band normalizes against its own running peak (auto-leveler, ~30 s memory: it adapts to the source's level, not to a breakdown) so any source fills 0..1. Envelopes: 20 ms attack, 200 ms release (400 ms for loudness). Per-band onsets fire `getHit(band)`, which jumps to 1 and decays over ~250 ms. `getFreqAt(hz)` gives a particle its own leveled bin. Knobs in `AUDIO_TUNING`. |
 | `DemoAnalyzer` | Synthetic 120 BPM track (kick, snare on 2 and 4, off-beat hats, 8-bar pad swell, a breakdown every fourth phrase) written into the FFT bytes and waveform, then run through the same `_analyze` as live audio. |
-| `Core` | A planet. Has a `role` (`central`, `satellite` or `partner`), `mass`, `charge`, `radius`, lifecycle (`spawning -> alive -> collapsing -> dead`), and a custom GLSL shader (hot nucleus, halo, rim, drifting value-noise atmosphere). Physics state (`position`, `velocity`, `acceleration`) is integrated by the Visualizer, not by the Core. |
-| `MagneticParticles` | Up to 5000 particles that trace magnetic field lines. Every alive core is a monopole with its `effectiveCharge`; particles are emitted at positive cores, follow the summed field, and land on negative cores (if no positive core is alive the survivors emit outward instead). Dormant pool plus an emission budget: rate and speed follow volume, so streams thin out when quiet. Each particle's FFT bin drives brightness and a sideways shimmer. All motion is `dt`-scaled. Knobs live in `PARTICLE_TUNING`. Rendered as a `Points` cloud plus a `LineSegments` trail buffer. |
+| `Core` | A planet. Has a `role` (`central`, `satellite` or `partner`), `mass`, `charge`, `radius`, lifecycle (`spawning -> alive -> collapsing -> dead`), and a custom GLSL shader (hot nucleus, halo, rim, drifting value-noise atmosphere). Keeps a 32-slot ring buffer of surface events (`addSurfaceEvent`: flare spots, landings, bounces) in object space; the shader draws them as a quick flare ring or a raindrop ripple. Physics state (`position`, `velocity`, `acceleration`) is integrated by the Visualizer, not by the Core. |
+| `MagneticParticles` | Up to 5000 particles thrown off source cores, mostly on bass hits. A hit grows 2-4 flare spots per source and the burst erupts from them; a low trickle runs between hits. Each particle's launch energy comes from its own frequency's level at that instant. Near its source it is ballistic under the source's gravity (escape speed is the same on every body): low energy rises, bounces once and lands; high energy clears ~2 radii and hands over to the magnetic field. Every alive core is a monopole with its `effectiveCharge`, escapees follow the summed field from positive cores to negative ones and land there (if no positive core is alive the survivors emit outward instead). Landings and bounces register ripples on the surface. All motion is `dt`-scaled. Knobs live in `PARTICLE_TUNING`. Rendered as a `Points` cloud plus a `LineSegments` trail buffer. |
 | `Nebula` | 12 procedural sprite blobs with additive blending. Off by default, toggled with B. |
 | `Visualizer` | Main orchestrator: scene, camera, bloom post-processing, system spawning, n-body physics, core lifecycle, camera drift. |
 
@@ -76,11 +76,11 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
 ## What reacts to what
 
 - Bass envelope: planet glow, central light, gravity (`G` up to 1.3x)
-- Bass hit: planet flash and ~5% swell, light and bloom spike, a burst of particles from the sources
+- Bass hit: planet flash and ~5% swell, light and bloom spike, flare spots on each source and a burst of particles from them (bigger on a harder kick)
 - Mid envelope: planet glow (lightly)
 - Treble envelope: particle shimmer
-- Loudness (RMS): particle emission rate and speed, particle brightness floor, bloom, nebula opacity
-- Each particle's own frequency: its speed along the line and its brightness
+- Loudness (RMS): particle trickle rate and field speed, particle brightness floor, bloom, nebula opacity
+- Each particle's own frequency: its launch energy (fall back and bounce vs escape to another planet), its speed along the line and its brightness
 - Camera: nothing. It never reacts to audio
 
 ## Project tracker
@@ -93,11 +93,13 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
 - **Orbital dynamics**: cores rewritten as an n-body gravity sim with solar / binary / trinary system types and smooth barycenter handoff on collapse
 - **Field-line particles**: particles trace the monopole field from positive to negative cores, `dt`-scaled, with emission that thins out when quiet, collapse pull and death burst
 - **Audio analysis**: real-frequency bands, RMS loudness, auto-leveler, musical envelopes, per-band onsets with a decaying hit, log-spaced particle listeners, a demo track with beats and a breakdown
+- **Emission and surface**: beat-driven bursts from flare spots, launch energy by frequency (bounce vs escape under source gravity), flare and ripple rings on the planet surface
 - **UI polish**: help overlay, keyboard shortcuts, mode/palette cycling, overlay z-index fixes
 
 ### Open work areas
 
-1. **Particle feel**: tune `PARTICLE_TUNING` by eye (speeds, emission, shimmer, pull, burst)
+1. **Particle feel**: tune `PARTICLE_TUNING` by eye (burst size, spots, launch speeds, `srcGravity` for the bounce/escape split, shimmer, pull)
+   - Ring sizes and lives are constants in the planet fragment shader (angular, so small bodies get small ripples)
    - Trails are JS arrays with `splice`, GC churn at 5000 particles
    - A particle's trail vanishes with it on landing instead of draining into the core
    - Particles ignore `role` beyond the sign of the charge
