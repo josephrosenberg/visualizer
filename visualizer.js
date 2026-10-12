@@ -596,8 +596,9 @@ class Core {
 
     if (!this.alive) return;
 
-    // A bass hit swells the body ~5% on top of its lifecycle scale.
-    const hit = audio.getHit('bass');
+    // A bass hit swells the body ~5% on top of its lifecycle scale. Hits
+    // land softer in quiet passages so the planets calm down with the music.
+    const hit = audio.getHit('bass') * (0.35 + 0.65 * audio.getVolume());
     this.mesh.scale.setScalar(Math.max(0.001, this.scaleT) * (1 + hit * 0.05));
     this.mesh.position.copy(this.position);
     this.mesh.rotation.y += 0.005;
@@ -650,14 +651,17 @@ const PARTICLE_TUNING = {
   spotsMax:      4,
   spotSpread:    0.26,  // radians of scatter around a flare spot
   // Launch
+  energyQuiet:   0.25,  // at silence, this much of a particle's level becomes launch energy
+  energyLoud:    1.0,   // ...and this much at full loudness, so loud passages escape more
+  energyNoise:   0.3,   // random spread on energy, keeps both populations present
   launchMin:     1.2,   // speed at zero energy
   launchMax:     6.5,   // speed at full energy
   launchSpread:  0.15,  // sideways speed as a fraction of launch speed
   srcGravity:    6.0,   // escape speed off any surface = sqrt(2 * srcGravity), ~3.5
   restitution:   0.35,  // one bounce before landing
   bounceMin:     0.8,   // impacts slower than this just land
-  escapeInner:   1.4,   // radii: the field starts taking over
-  escapeOuter:   2.4,   // radii: fully on the field, source gravity off
+  escapeInner:   1.6,   // radii: the field starts taking over
+  escapeOuter:   2.6,   // radii: fully on the field, source gravity off
   // Field flight
   speedBase:     1.6,   // cruise speed along a field line at silence
   speedVolume:   1.8,   // extra speed per unit of volume
@@ -713,6 +717,7 @@ class MagneticParticles {
     this.kicks = new Float32Array(n);     // seconds of reduced steering left after a burst
     this.brightness = new Float32Array(n);
     this.listenHz = new Float32Array(n);  // the frequency each particle listens to
+    this.sizeMul = new Float32Array(n);   // per-particle size, so they keep their individuality
     this.phases = new Float32Array(n);    // shimmer phase offset
     this.trails = [];                     // per-particle position history (flat xyz)
 
@@ -721,6 +726,7 @@ class MagneticParticles {
       // most particles above 4 kHz, where music has almost nothing.
       const [loHz, hiHz] = AUDIO_TUNING.particleHz;
       this.listenHz[i] = loHz * Math.pow(hiHz / loHz, Math.random());
+      this.sizeMul[i] = Math.pow(2, (Math.random() - 0.5) * 2); // 0.5x .. 2x, log-uniform
       this.phases[i] = Math.random() * Math.PI * 2;
       this.trails[i] = [];
     }
@@ -854,11 +860,16 @@ class MagneticParticles {
     return this._dir;
   }
 
-  // Launch energy from the particle's own listener at this instant, plus a
-  // little extra on a hit. Hot bins escape, quiet bins bounce and fall back.
+  // Launch energy from the particle's own listener at this instant, scaled
+  // by loudness, plus a little extra on a hit. Hot bins escape, quiet bins
+  // bounce and fall back; quiet passages tilt toward falling back, loud
+  // passages toward interchange, and the noise keeps both present.
   _launchEnergy(i, audio, boost) {
+    const T = PARTICLE_TUNING;
     const amp = audio.getFreqAt(this.listenHz[i]);
-    const e = amp * 0.85 + boost + (Math.random() - 0.5) * 0.2;
+    const loud = audio.getVolume();
+    const gain = T.energyQuiet + (T.energyLoud - T.energyQuiet) * loud;
+    const e = amp * gain + boost * loud + (Math.random() - 0.5) * T.energyNoise;
     return e < 0 ? 0 : e > 1 ? 1 : e;
   }
 
@@ -934,7 +945,8 @@ class MagneticParticles {
   _flare(audio, time) {
     const T = PARTICLE_TUNING;
     const bassLevel = audio.getBass();
-    this.burstBudget += this.count * T.hitBurst * (T.hitBurstMin + (1 - T.hitBurstMin) * bassLevel);
+    const loud = audio.getVolume();
+    this.burstBudget += this.count * T.hitBurst * (T.hitBurstMin + (1 - T.hitBurstMin) * bassLevel) * (0.5 + 0.5 * loud);
     this._burstBoost = 0.25 * bassLevel;
     this._spotsByCore.clear();
     for (const c of this._emitters) {
@@ -1190,7 +1202,7 @@ class MagneticParticles {
       this.pointColors[i3 + 1] = c.g * bright;
       this.pointColors[i3 + 2] = c.b * bright;
 
-      this.pointSizes[i] = (1.0 + freqAmp * 3.0) * bright;
+      this.pointSizes[i] = (1.0 + freqAmp * 3.0) * bright * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]);
     }
 
     // Zero out unused points
@@ -1395,7 +1407,7 @@ class Visualizer {
     this.frozenOffset = 0;   // accumulated time spent frozen
     this.modeIndex = 0;
     this.paletteIndex = 0;
-    this.particleCount = 1500;
+    this.particleCount = 500;
     this.clock = new THREE.Clock();
 
     // Camera state — single slow drift around the system barycenter
@@ -1941,7 +1953,7 @@ class Visualizer {
 
     this._updateCamera(wallTime, dt);
 
-    const hit = this.audio.getHit('bass');
+    const hit = this.audio.getHit('bass') * (0.35 + 0.65 * volume);
     this.centralLight.intensity = 2.0 + bass * 3.0 + hit * 3.0 + volume * 1.5;
     const hue = 0.6 + treble * 0.1;
     this.centralLight.color.setHSL(hue, 0.5, 0.5 + volume * 0.3);
