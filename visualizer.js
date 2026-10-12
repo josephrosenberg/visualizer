@@ -695,15 +695,15 @@ const PARTICLE_TUNING = {
   speedVolume:   1.8,   // extra speed per unit of volume
   poleBoost:     0.8,   // up to +80% speed where the field is strong (near a core)
   poleFieldRef:  0.5,   // |B| at which poleBoost saturates
-  steer:         10,    // 1/s, how fast velocity turns toward the field line
-  shimmer:       0.6,   // sideways wobble speed driven by the particle's FFT bin
+  steer:         1.5,   // 1/s, how fast velocity bends toward the field line (a nudge, not an override)
+  shimmer:       1.2,   // sideways wobble speed driven by the particle's FFT bin
   fadeIn:        0.12,  // seconds to full brightness after emission
   maxAge:        14,    // seconds before a particle is recycled regardless
   boundaryMult:  2.2,   // lines that escape past this many extents recycle
   boundaryMin:   12,    // ...but never closer than this
   // Collapse
   pullRadii:     4,     // a collapsing core pulls particles from this many radii out
-  pullStrength:  7,     // inward speed added at full collapse, at the core
+  pullStrength:  10,    // inward acceleration at full collapse, at the core
   burstSpeed:    8,     // outward impulse when a core dies
   burstRadii:    2.5,   // particles within this many radii of a dying core get it
   kickDecay:     1.2,   // seconds for a burst to hand control back to the field
@@ -1116,10 +1116,11 @@ class MagneticParticles {
       const age = this.ages[i];
       const src = this.escaped[i] ? null : this.sourceCore[i];
 
-      // Field at p, plus the collapse pull, plus surface contact. The
-      // particle's own source is handled separately while it's ballistic.
+      // Field at p, gravity from every core, the collapse pull, and surface
+      // contact. The particle's own source is handled separately while it's
+      // ballistic (its gravity, bounce and escape test live there).
       let fx = 0, fy = 0, fz = 0;
-      let pullX = 0, pullY = 0, pullZ = 0;
+      let gx = 0, gy = 0, gz = 0;
       let absorbedBy = null;
       for (const core of alive) {
         if (core === src) continue;
@@ -1141,15 +1142,16 @@ class MagneticParticles {
         fy += q * dy;
         fz += q * dz;
 
+        // Gravity, same scaling as the launch phase: escape speed off any
+        // surface is sqrt(2 * srcGravity). Momentum carries through flybys.
+        let a = T.srcGravity * surface / Math.max(d2, surface * surface * 0.25);
         if (ct > 0) {
           const reach = core.radius * T.pullRadii + 1;
-          if (d < reach) {
-            const g = (1 - d / reach) * ct * ct * T.pullStrength / d;
-            pullX -= dx * g;
-            pullY -= dy * g;
-            pullZ -= dz * g;
-          }
+          if (d < reach) a += (1 - d / reach) * ct * ct * T.pullStrength;
         }
+        gx -= dx / d * a;
+        gy -= dy / d * a;
+        gz -= dz / d * a;
       }
       if (absorbedBy) {
         absorbedBy.addSurfaceEvent(px, py, pz, 1, time);
@@ -1162,7 +1164,6 @@ class MagneticParticles {
       // arc until its speed beats escape speed at its current distance, so
       // sub-escape launches rise as far as their speed allows and fall back,
       // while unbound ones hand over to the field once clear of the surface.
-      let gx = 0, gy = 0, gz = 0;
       let onField = 1;
       if (src) {
         if (!src.alive) {
@@ -1182,9 +1183,9 @@ class MagneticParticles {
           } else {
             onField = 0;
             const a = K / Math.max(d2, r * r * 0.25);
-            gx = -dx / d * a;
-            gy = -dy / d * a;
-            gz = -dz / d * a;
+            gx -= dx / d * a;
+            gy -= dy / d * a;
+            gz -= dz / d * a;
 
             if (d < r && age > 0.03) {
               const nx = dx / d, ny = dy / d, nz = dz / d;
@@ -1217,7 +1218,7 @@ class MagneticParticles {
       // its live bin adds a little on top.
       const freqAmp = audio.getFreqAt(this.listenHz[i]);
       const fmag = Math.sqrt(fx * fx + fy * fy + fz * fz);
-      let tx = pullX, ty = pullY, tz = pullZ;
+      let tx = 0, ty = 0, tz = 0;
       if (fmag > 1e-6) {
         const inv = this.flowDir[i] / fmag;
         const ux = fx * inv, uy = fy * inv, uz = fz * inv;
@@ -1239,7 +1240,8 @@ class MagneticParticles {
         continue;
       }
 
-      // Steering is off while ballistic, full once the particle has escaped.
+      // Steering is off while ballistic, and only a gentle bend once the
+      // particle has escaped: gravity and its own momentum do the rest.
       let steer = steerBase * onField;
       if (this.kicks[i] > 0) {
         steer *= 0.15;
