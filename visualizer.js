@@ -678,7 +678,11 @@ const PARTICLE_TUNING = {
   energyNoise:   0.3,   // random spread on energy, keeps both populations present
   launchMin:     1.2,   // speed at zero energy
   launchMax:     6.5,   // speed at full energy
-  launchSpread:  0.15,  // sideways speed as a fraction of launch speed
+  launchSpread:  0.08,  // random jitter on launch velocity, as a fraction of launch speed
+  launchElevMin: 25,    // degrees above the local horizon for the flattest launch
+  launchElevMax: 90,    // ...and the steepest (straight up)
+  launchElevBias: 2.0,  // higher = more launches near vertical, fewer lofted
+  spotLean:      0.5,   // how much a burst scatters around its flare's jet direction
   srcGravity:    6.0,   // escape speed off any surface = sqrt(2 * srcGravity), ~3.5
   restitution:   0.35,  // one bounce before landing
   bounceMin:     0.8,   // impacts slower than this just land
@@ -718,8 +722,9 @@ class MagneticParticles {
     this.activeCount = 0;    // particles in flight
     this.burstBudget = 0;    // hit bursts, from flare spots
     this._burstKick = 0;     // bass level at the last flare
-    this._spotsByCore = new Map(); // Core -> flat [x,y,z,...] world directions
+    this._spotsByCore = new Map(); // Core -> flat [nx,ny,nz, lx,ly,lz, ...]: surface direction + jet lean
     this._dir = [0, 0, 0];
+    this._lean = [0, 0, 0];
 
     // Per-particle state. Everything starts dormant (hidden) and is released
     // through the emission budgets, so streams build up over the first second.
@@ -883,6 +888,17 @@ class MagneticParticles {
     return this._dir;
   }
 
+  // Uniform random unit vector into this._lean (the azimuth hint for a launch).
+  _randomLean() {
+    const theta = Math.random() * Math.PI * 2;
+    const z = 2 * Math.random() - 1;
+    const s = Math.sqrt(1 - z * z);
+    this._lean[0] = s * Math.cos(theta);
+    this._lean[1] = s * Math.sin(theta);
+    this._lean[2] = z;
+    return this._lean;
+  }
+
   // Launch energy: the particle's own listener at this instant, scaled by
   // loudness and multiplied by the strength of the kick that threw it. Hot
   // bins escape, quiet bins bounce and fall back; a hard kick pushes the
@@ -899,8 +915,11 @@ class MagneticParticles {
   }
 
   // Release a dormant particle off a core's surface at direction n (unit),
-  // moving outward at a speed set by its energy, carried along with the core.
-  _emit(i, core, nx, ny, nz, energy) {
+  // carried along with the core. Speed comes from energy. The launch is
+  // lofted: most leave near-vertical, some go up at a slant like a missile,
+  // with the azimuth taken from the lean hint l (a flare's jet direction, or
+  // random for the trickle).
+  _emit(i, core, nx, ny, nz, energy, lx, ly, lz) {
     const T = PARTICLE_TUNING;
     const i3 = i * 3;
     const r = core.radius * Math.max(core.scaleT, 0.05) * 1.02;
@@ -909,11 +928,27 @@ class MagneticParticles {
     this.positions[i3 + 1] = core.position.y + ny * r;
     this.positions[i3 + 2] = core.position.z + nz * r;
 
+    // Tangent in the surface plane from the lean hint
+    const ln = lx * nx + ly * ny + lz * nz;
+    let tx = lx - ln * nx, ty = ly - ln * ny, tz = lz - ln * nz;
+    let tl = Math.sqrt(tx * tx + ty * ty + tz * tz);
+    if (tl < 1e-3) {
+      tx = -nz; ty = 0; tz = nx;
+      tl = Math.sqrt(tx * tx + tz * tz);
+      if (tl < 1e-3) { tx = 0; ty = -nz; tz = ny; tl = Math.sqrt(ty * ty + tz * tz) || 1; }
+    }
+    tx /= tl; ty /= tl; tz /= tl;
+
+    const elevDeg = T.launchElevMax - (T.launchElevMax - T.launchElevMin) * Math.pow(Math.random(), T.launchElevBias);
+    const elev = elevDeg * Math.PI / 180;
+    const se = Math.sin(elev), ce = Math.cos(elev);
+    const dx = nx * se + tx * ce, dy = ny * se + ty * ce, dz = nz * se + tz * ce;
+
     const v0 = T.launchMin + energy * (T.launchMax - T.launchMin);
     const sp = v0 * T.launchSpread * 2;
-    this.velocities[i3]     = core.velocity.x + nx * v0 + (Math.random() - 0.5) * sp;
-    this.velocities[i3 + 1] = core.velocity.y + ny * v0 + (Math.random() - 0.5) * sp;
-    this.velocities[i3 + 2] = core.velocity.z + nz * v0 + (Math.random() - 0.5) * sp;
+    this.velocities[i3]     = core.velocity.x + dx * v0 + (Math.random() - 0.5) * sp;
+    this.velocities[i3 + 1] = core.velocity.y + dy * v0 + (Math.random() - 0.5) * sp;
+    this.velocities[i3 + 2] = core.velocity.z + dz * v0 + (Math.random() - 0.5) * sp;
 
     if (!this.active[i]) this.activeCount++;
     this.active[i] = 1;
@@ -982,25 +1017,30 @@ class MagneticParticles {
       const spots = [];
       for (let k = 0; k < n; k++) {
         const d = this._randomDir();
-        spots.push(d[0], d[1], d[2]);
+        const l = this._randomLean();
+        spots.push(d[0], d[1], d[2], l[0], l[1], l[2]);
         c.addSurfaceEvent(c.position.x + d[0] * r, c.position.y + d[1] * r, c.position.z + d[2] * r, 0, time);
       }
       this._spotsByCore.set(c, spots);
     }
   }
 
-  // Direction for a burst particle: a spot of this core, scattered.
+  // Direction for a burst particle: a spot of this core, scattered, with the
+  // spot's jet direction (scattered too) left in this._lean.
   _spotDir(core) {
     const T = PARTICLE_TUNING;
     const spots = this._spotsByCore.get(core);
-    const d = this._dir;
-    if (!spots || spots.length === 0) return this._randomDir();
-    const k = Math.floor(Math.random() * (spots.length / 3)) * 3;
+    const d = this._dir, ln = this._lean;
+    if (!spots || spots.length === 0) { this._randomLean(); return this._randomDir(); }
+    const k = Math.floor(Math.random() * (spots.length / 6)) * 6;
     d[0] = spots[k]     + (Math.random() - 0.5) * 2 * T.spotSpread;
     d[1] = spots[k + 1] + (Math.random() - 0.5) * 2 * T.spotSpread;
     d[2] = spots[k + 2] + (Math.random() - 0.5) * 2 * T.spotSpread;
     const l = Math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) || 1;
     d[0] /= l; d[1] /= l; d[2] /= l;
+    ln[0] = spots[k + 3] + (Math.random() - 0.5) * 2 * T.spotLean;
+    ln[1] = spots[k + 4] + (Math.random() - 0.5) * 2 * T.spotLean;
+    ln[2] = spots[k + 5] + (Math.random() - 0.5) * 2 * T.spotLean;
     return d;
   }
 
@@ -1055,13 +1095,15 @@ class MagneticParticles {
         if (canEmit && this.burstBudget >= 1 && burstThisFrame < burstCap) {
           const core = this._pickEmitter();
           const d = this._spotDir(core);
-          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, this._burstKick));
+          const l = this._lean;
+          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, this._burstKick), l[0], l[1], l[2]);
           this.burstBudget -= 1;
           burstThisFrame++;
         } else if (canEmit && this.emitBudget >= 1) {
           const core = this._pickEmitter();
           const d = this._randomDir();
-          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, audio.getBass() * 0.6));
+          const l = this._randomLean();
+          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, audio.getBass() * 0.6), l[0], l[1], l[2]);
           this.emitBudget -= 1;
         } else {
           this.pointSizes[i] = 0;
