@@ -662,6 +662,9 @@ const PARTICLE_TUNING = {
   bounceMin:     0.8,   // impacts slower than this just land
   escapeInner:   1.6,   // radii: the field starts taking over
   escapeOuter:   2.6,   // radii: fully on the field, source gravity off
+  // Look
+  pointSize:     0.45,  // base sprite size (pixels ~ size * 250 / distance)
+  poolQuiet:     0.25,  // fraction of the pool allowed in flight at silence; all of it at full loudness
   // Field flight
   speedBase:     1.6,   // cruise speed along a field line at silence
   speedVolume:   1.8,   // extra speed per unit of volume
@@ -696,6 +699,7 @@ class MagneticParticles {
     this.rayStyle = 'ribbon';
     this.t = 0;
     this.emitBudget = 0;     // trickle
+    this.activeCount = 0;    // particles in flight
     this.burstBudget = 0;    // hit bursts, from flare spots
     this._lastHit = 0;
     this._burstBoost = 0;
@@ -726,7 +730,7 @@ class MagneticParticles {
       // most particles above 4 kHz, where music has almost nothing.
       const [loHz, hiHz] = AUDIO_TUNING.particleHz;
       this.listenHz[i] = loHz * Math.pow(hiHz / loHz, Math.random());
-      this.sizeMul[i] = Math.pow(2, (Math.random() - 0.5) * 2); // 0.5x .. 2x, log-uniform
+      this.sizeMul[i] = 0.6 * Math.pow(3, Math.random());        // 0.6x .. 1.8x, log-uniform
       this.phases[i] = Math.random() * Math.PI * 2;
       this.trails[i] = [];
     }
@@ -762,8 +766,12 @@ class MagneticParticles {
         void main() {
           float d = length(gl_PointCoord - 0.5) * 2.0;
           if (d > 1.0) discard;
-          float alpha = (1.0 - d * d) * 0.8;
-          gl_FragColor = vec4(vColor, alpha);
+          // Solid disc with a thin feathered edge and a hot center, so a
+          // particle reads as a point of light rather than a fog blob.
+          float disc = 1.0 - smoothstep(0.6, 1.0, d);
+          float core = 1.0 - smoothstep(0.0, 0.35, d);
+          float alpha = disc * 0.85 + core * 0.6;
+          gl_FragColor = vec4(vColor * (1.0 + core * 0.6), alpha);
         }
       `,
       transparent: true,
@@ -890,6 +898,7 @@ class MagneticParticles {
     this.velocities[i3 + 1] = core.velocity.y + ny * v0 + (Math.random() - 0.5) * sp;
     this.velocities[i3 + 2] = core.velocity.z + nz * v0 + (Math.random() - 0.5) * sp;
 
+    if (!this.active[i]) this.activeCount++;
     this.active[i] = 1;
     this.flowDir[i] = core.effectiveCharge >= 0 ? 1 : -1;
     this.escaped[i] = 0;
@@ -903,6 +912,7 @@ class MagneticParticles {
   }
 
   _sleep(i) {
+    if (this.active[i]) this.activeCount--;
     this.active[i] = 0;
     this.brightness[i] = 0;
     this.pointSizes[i] = 0;
@@ -1009,6 +1019,11 @@ class MagneticParticles {
     const burstCap = this.count * T.burstCap;
     let burstThisFrame = 0;
 
+    // How many may be in flight follows loudness: quiet means a sparse
+    // scene, loud means the whole pool. Nothing is killed early; emission
+    // just waits for natural recycling to bring the count under the cap.
+    const activeCap = this.count * (T.poolQuiet + (1 - T.poolQuiet) * volume);
+
     const speed = T.speedBase + volume * T.speedVolume;
     const steerBase = Math.min(1, dt * T.steer);
     const shimmerT = this.t * 6;
@@ -1017,6 +1032,10 @@ class MagneticParticles {
       const i3 = i * 3;
 
       if (!this.active[i]) {
+        if (this.activeCount >= activeCap) {
+          this.pointSizes[i] = 0;
+          continue;
+        }
         if (canEmit && this.burstBudget >= 1 && burstThisFrame < burstCap) {
           const core = this._pickEmitter();
           const d = this._spotDir(core);
@@ -1202,7 +1221,7 @@ class MagneticParticles {
       this.pointColors[i3 + 1] = c.g * bright;
       this.pointColors[i3 + 2] = c.b * bright;
 
-      this.pointSizes[i] = (1.0 + freqAmp * 3.0) * bright * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]);
+      this.pointSizes[i] = T.pointSize * (0.6 + freqAmp * 0.8) * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]) * (0.5 + 0.5 * bright);
     }
 
     // Zero out unused points
@@ -1723,9 +1742,9 @@ class Visualizer {
 
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.9,   // strength
-      0.5,   // radius
-      0.45   // threshold - only the brightest particle cores bloom
+      0.7,   // strength
+      0.4,   // radius
+      0.6    // threshold - only the brightest cores and flashes bloom
     );
     this.composer.addPass(this.bloomPass);
   }
@@ -1754,7 +1773,7 @@ class Visualizer {
     const mode = MODES[this.modeIndex];
     const palette = PALETTES[this.paletteIndex];
     const el = document.getElementById('info-text');
-    el.innerHTML = `${mode.name} / ${palette.name}<br>${this.particleCount} particles${this.nebula.enabled ? ' / nebula' : ''}${this.frozen ? ' / frozen' : ''}`;
+    el.innerHTML = `${mode.name} / ${palette.name}<br>${this.particles.activeCount} / ${this.particleCount} particles${this.nebula.enabled ? ' / nebula' : ''}${this.frozen ? ' / frozen' : ''}`;
   }
 
   _bindEvents() {
@@ -1968,11 +1987,14 @@ class Visualizer {
     // Nebula
     this.nebula.update(this.audio);
 
+    this._infoFrames = (this._infoFrames || 0) + 1;
+    if (this._infoFrames % 30 === 0) this._updateInfo();
+
     // Starfield drift
     this.starfield.rotation.y += 0.00008;
 
     // Bloom reacts to volume
-    this.bloomPass.strength = 0.7 + volume * 0.9 + hit * 0.5;
+    this.bloomPass.strength = 0.5 + volume * 0.6 + hit * 0.4;
 
     this.composer.render();
   }

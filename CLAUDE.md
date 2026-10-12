@@ -79,7 +79,7 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
 - Bass hit: planet flash and ~5% swell, light and bloom spike, flare spots on each source and a burst of particles from them (bigger on a harder kick)
 - Mid envelope: planet glow (lightly)
 - Treble envelope: particle shimmer
-- Loudness (RMS): the slider between falling back and interchange (launch energy gain), how hard hits land on the planets and in the burst size, particle trickle rate and field speed, particle brightness floor, bloom, nebula opacity
+- Loudness (RMS): how many particles may be in flight (`poolQuiet` of the pool at silence, all of it at full loudness), the slider between falling back and interchange (launch energy gain), how hard hits land on the planets and in the burst size, particle trickle rate and field speed, particle brightness floor, bloom, nebula opacity
 - Each particle's own frequency: its launch energy (fall back and bounce vs escape to another planet), its speed along the line and its brightness
 - Camera: nothing. It never reacts to audio
 
