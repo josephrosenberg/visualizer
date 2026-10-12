@@ -682,8 +682,7 @@ const PARTICLE_TUNING = {
   srcGravity:    6.0,   // escape speed off any surface = sqrt(2 * srcGravity), ~3.5
   restitution:   0.35,  // one bounce before landing
   bounceMin:     0.8,   // impacts slower than this just land
-  escapeInner:   1.6,   // radii: the field starts taking over
-  escapeOuter:   2.6,   // radii: fully on the field, source gravity off
+  escapeRadii:   1.6,   // radii: an unbound particle hands over to the field from here out
   // Look
   pointSize:     0.45,  // base sprite size (pixels ~ size * 250 / distance)
   poolQuiet:     0.25,  // fraction of the pool allowed in flight at silence; all of it at full loudness
@@ -704,11 +703,6 @@ const PARTICLE_TUNING = {
   burstSpeed:    8,     // outward impulse when a core dies
   burstRadii:    2.5,   // particles within this many radii of a dying core get it
   kickDecay:     1.2,   // seconds for a burst to hand control back to the field
-};
-
-const smoothstep01 = (a, b, x) => {
-  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
-  return t * t * (3 - 2 * t);
 };
 
 class MagneticParticles {
@@ -1122,6 +1116,10 @@ class MagneticParticles {
       }
 
       // Ballistic phase: the source's gravity, a bounce, a landing, or escape.
+      // Escape is decided by energy, not distance: a particle stays on its
+      // arc until its speed beats escape speed at its current distance, so
+      // sub-escape launches rise as far as their speed allows and fall back,
+      // while unbound ones hand over to the field once clear of the surface.
       let gx = 0, gy = 0, gz = 0;
       let onField = 1;
       if (src) {
@@ -1134,11 +1132,14 @@ class MagneticParticles {
           const d2 = dx * dx + dy * dy + dz * dz;
           const d = Math.sqrt(d2) + 1e-6;
           const r = src.radius * Math.max(src.scaleT, 0.05);
-          onField = smoothstep01(T.escapeInner, T.escapeOuter, d / r);
-          if (onField >= 1) {
+          const K = T.srcGravity * r;
+          const rvx = vx - src.velocity.x, rvy = vy - src.velocity.y, rvz = vz - src.velocity.z;
+          const unbound = 0.5 * (rvx * rvx + rvy * rvy + rvz * rvz) > K / d;
+          if (unbound && d > r * T.escapeRadii) {
             this.escaped[i] = 1;
           } else {
-            const a = T.srcGravity * r / Math.max(d2, r * r * 0.25) * (1 - onField);
+            onField = 0;
+            const a = K / Math.max(d2, r * r * 0.25);
             gx = -dx / d * a;
             gy = -dy / d * a;
             gz = -dz / d * a;
@@ -1146,7 +1147,7 @@ class MagneticParticles {
             if (d < r && age > 0.03) {
               const nx = dx / d, ny = dy / d, nz = dz / d;
               // Impact speed relative to the moving surface
-              const vr = (vx - src.velocity.x) * nx + (vy - src.velocity.y) * ny + (vz - src.velocity.z) * nz;
+              const vr = rvx * nx + rvy * ny + rvz * nz;
               if (!this.bounced[i] && -vr > T.bounceMin) {
                 const k = (1 + T.restitution) * vr;
                 vx -= k * nx;
@@ -1196,7 +1197,7 @@ class MagneticParticles {
         continue;
       }
 
-      // Steering is off while ballistic and fades in across the escape zone.
+      // Steering is off while ballistic, full once the particle has escaped.
       let steer = steerBase * onField;
       if (this.kicks[i] > 0) {
         steer *= 0.15;
