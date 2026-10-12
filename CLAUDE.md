@@ -19,11 +19,12 @@ After editing `visualizer.js`, bump the `?v=N` cache-buster on the script tag in
 
 ## Project structure
 
-Two files, that's it:
+Two files plus headless tests:
 - `index.html`: entry point, overlay UI, keyboard help panel, Three.js CDN imports (via importmap)
-- `visualizer.js`: all logic (~1400 lines, single monolithic file)
+- `visualizer.js`: all logic (~2000 lines, single monolithic file)
+- `test/`: headless smoke suites (see Testing changes)
 
-No build system, no bundler, no tests, no linter. Three.js 0.162 is loaded from CDN.
+No build system, no bundler, no linter. Three.js 0.162 is loaded from CDN.
 
 ## Architecture (visualizer.js)
 
@@ -66,6 +67,14 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
 
 ## Testing changes
 
+Headless first: `node test/run.mjs` (Node 18+, no install). `test/harness.mjs` loads `visualizer.js` under a stub `THREE` with no DOM or WebGL and exports the classes; the suites drive them for simulated seconds and check behaviour, not pixels:
+- `smoke-particles.mjs`: emission, bounce vs escape by energy, the loudness and kick balance, surface rings, collapse and death burst, lone sun (no hover shell), lone sink
+- `smoke-audio.mjs`: band layout, silence, the demo track through the real `_analyze` (hits at 2/s, none in the breakdown, accents, leveler range), particle bursts on hits
+- `smoke-planets.mjs`: a `Visualizer` built from its prototype (no renderer): locked spawns 1-5, lock up and down, refill, sun replacement, 60 s of physics under a lock
+
+Each suite prints the numbers it measured next to PASS/FAIL, which is the fastest way to see what a tuning change did. Shaders are not covered; only the browser can tell you a GLSL change compiled.
+
+Then in the browser:
 1. `python3 -m http.server 8080`, open localhost:8080
 2. Click "Demo Mode" for quick iteration (no audio source needed)
 3. Use `F` (freeze) to inspect planets at rest
