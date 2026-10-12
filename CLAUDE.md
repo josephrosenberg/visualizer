@@ -48,7 +48,7 @@ No build system, no bundler, no tests, no linter. Three.js 0.162 is loaded from 
 
 Charges are only used for the particle <-> core interaction. Gravity is mass-based and always attracting.
 
-Lifecycle: spawn (2-3.5 s elastic scale-in), alive (35-85 s), collapse (2.5-4 s scale-out), dead (mesh destroyed). When the last body of a system dies, a new system spawns. A collapsing core pulls nearby particles in (and stops absorbing them past 30% collapse so they pile up), then releases them in an outward burst on the frame it dies.
+Lifecycle: spawn (2-3.5 s elastic scale-in), alive (35-85 s), collapse (2.5-4 s scale-out), dead (mesh destroyed). When the last body of a system dies, a new system spawns. With a planet count locked (`targetBodies`, keys 1-5) the system is kept at that size instead: extra bodies collapse lightest-and-outermost first, missing ones are added as satellites on a circular orbit outside the outermost body (or a new sun at the barycenter if nothing heavy is left), and a fresh system is built at that size (1 lone sun, 2 binary, 3 solar or trinary, 4-5 solar). A collapsing core pulls nearby particles in (and stops absorbing them past 30% collapse so they pile up), then releases them in an outward burst on the frame it dies.
 
 ## Camera
 
@@ -62,7 +62,7 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
 
 ## Keyboard shortcuts
 
-`M`/`N` cycle modes, `P` cycle palettes, `F` freeze (stops core physics and shader time; particles and camera keep moving), `B` toggle nebula, `A`/`S` add/remove 200 particles, `?` help, `Esc` close help.
+`M`/`N` cycle modes, `P` cycle palettes, `F` freeze (stops core physics and shader time; particles and camera keep moving), `B` toggle nebula, `A`/`S` add/remove 200 particles, `1`-`5` set and hold the number of planets (`0` back to random systems), `?` help, `Esc` close help.
 
 ## Testing changes
 

@@ -321,6 +321,10 @@ class DemoAnalyzer extends AudioAnalyzer {
 // 3–8). Audio bass scales this up to ~1.4× for "system breathes" on hits.
 const PHYSICS_G = 1.4;
 
+// Bodies at or above this mass count as a sun or partner; below it they're
+// satellites. Satellites are 0.4-0.8, partners 1.5+, suns 7+.
+const HEAVY_MASS = 1.2;
+
 // ─── Core (Planet with shader-based surface) ─────────────────────────────────
 
 // Recent surface events per planet (flare spots, landings, bounces), drawn by
@@ -487,6 +491,7 @@ class Core {
     this.lifeDuration = 35 + Math.random() * 50;
     this.collapseDuration = 2.5 + Math.random() * 1.5;
     this.scaleT = 0;
+    this.collapseFrom = 1;   // scale at the start of the collapse
 
     // Ring buffer of surface events for the shader; start times far in the
     // past so empty slots never draw.
@@ -589,13 +594,10 @@ class Core {
       }
     } else if (this.phase === 'alive') {
       this.scaleT = 1;
-      if (this.phaseTime >= this.lifeDuration) {
-        this.phase = 'collapsing';
-        this.phaseTime = 0;
-      }
+      if (this.phaseTime >= this.lifeDuration) this.beginCollapse();
     } else if (this.phase === 'collapsing') {
       const t = Math.min(1, this.phaseTime / this.collapseDuration);
-      this.scaleT = 1 - t * t * t;
+      this.scaleT = this.collapseFrom * (1 - t * t * t);
       if (this.phaseTime >= this.collapseDuration) {
         this.phase = 'dead';
         this.alive = false;
@@ -618,6 +620,15 @@ class Core {
     this.uniforms.uMid.value = audio.getMid();
     this.uniforms.uTreble.value = audio.getTreble();
     this.uniforms.uHit.value = hit;
+  }
+
+  // Start collapsing now, from the current scale, so a body that's still
+  // spawning shrinks back instead of popping to full size first.
+  beginCollapse() {
+    if (this.phase === 'collapsing' || this.phase === 'dead') return;
+    this.collapseFrom = this.scaleT;
+    this.phase = 'collapsing';
+    this.phaseTime = 0;
   }
 
   destroy() {
@@ -1454,6 +1465,7 @@ class Visualizer {
 
     // System state
     this.systemConfig = null;
+    this.targetBodies = 0;   // 0 = random systems; 1-5 = a count the system keeps
 
     this._initRenderer();
     this._initScene();
@@ -1509,12 +1521,20 @@ class Visualizer {
 
   // Pick a system configuration and spawn its cores with initial conditions
   // chosen so the resulting n-body dynamics produce the intended visual feel.
-  _spawnSystem() {
-    const r = Math.random();
-    let type;
-    if (r < 0.4) type = 'solar';
-    else if (r < 0.75) type = 'binary';
-    else type = 'trinary';
+  // With a target count: 1 lone sun, 2 binary, 3 solar or trinary, 4-5 solar
+  // with 3-4 satellites. Without one, the usual random mix.
+  _spawnSystem(count = 0) {
+    let type, sats;
+    if (count === 1) { type = 'solar'; sats = 0; }
+    else if (count === 2) { type = 'binary'; sats = 0; }
+    else if (count === 3) { type = Math.random() < 0.5 ? 'solar' : 'trinary'; sats = 2; }
+    else if (count >= 4) { type = 'solar'; sats = count - 1; }
+    else {
+      const r = Math.random();
+      if (r < 0.4) { type = 'solar'; sats = 2 + Math.floor(Math.random() * 2); }
+      else if (r < 0.75) { type = 'binary'; sats = Math.random() < 0.5 ? 1 : 0; }
+      else { type = 'trinary'; sats = 0; }
+    }
     this.systemConfig = type;
 
     // 1.05× nudge above circular gives mildly elliptical orbits — more
@@ -1540,8 +1560,7 @@ class Visualizer {
           (Math.random() - 0.5) * 0.05,
         ),
       });
-      const satCount = 2 + Math.floor(Math.random() * 2); // 2-3
-      for (let i = 0; i < satCount; i++) {
+      for (let i = 0; i < sats; i++) {
         const rad = 4.5 + i * 2.0 + Math.random() * 0.6;
         const angle = Math.random() * Math.PI * 2;
         const tilt = (Math.random() - 0.5) * 0.5;
@@ -1586,7 +1605,7 @@ class Visualizer {
         position: new THREE.Vector3(d, 0, 0),
         velocity: new THREE.Vector3(0, 0, -v),
       });
-      if (Math.random() < 0.5) {
+      if (sats > 0) {
         const rad = sep * (1.8 + Math.random() * 0.8);
         const angle = Math.random() * Math.PI * 2;
         const tilt = (Math.random() - 0.5) * 0.4;
@@ -1631,6 +1650,99 @@ class Visualizer {
         });
       }
     }
+  }
+
+  // Bodies that count toward the target: anything not already on its way out.
+  _liveCores() {
+    return this.cores.filter(c => c.phase === 'spawning' || c.phase === 'alive');
+  }
+
+  // Add one body to the running system. If nothing heavy is left, a new sun
+  // at the barycenter; otherwise a satellite on a circular orbit just outside
+  // the outermost body, charged opposite to the heaviest so streams connect.
+  _addBody() {
+    const live = this._liveCores();
+    if (live.length === 0) { this._spawnSystem(this.targetBodies); return; }
+
+    let M = 0, cx = 0, cy = 0, cz = 0, vx = 0, vy = 0, vz = 0;
+    let heavy = live[0];
+    for (const c of live) {
+      M += c.mass;
+      cx += c.position.x * c.mass; cy += c.position.y * c.mass; cz += c.position.z * c.mass;
+      vx += c.velocity.x * c.mass; vy += c.velocity.y * c.mass; vz += c.velocity.z * c.mass;
+      if (c.mass > heavy.mass) heavy = c;
+    }
+    cx /= M; cy /= M; cz /= M; vx /= M; vy /= M; vz /= M;
+
+    if (heavy.mass < HEAVY_MASS) {
+      const heavyMass = 7.0 + Math.random() * 3.0;
+      this._spawnCore({
+        role: 'central',
+        mass: heavyMass,
+        charge: heavy.charge < 0 ? 1.0 : -1.0,
+        radius: 1.9 + Math.random() * 0.4,
+        position: new THREE.Vector3(cx, cy, cz),
+        velocity: new THREE.Vector3(vx, vy, vz),
+      });
+      // The survivors have been coasting without a sun; put each back on a
+      // circular orbit around the new one at its current distance, keeping
+      // its current direction of travel.
+      for (const c of live) {
+        const rx = c.position.x - cx, ry = c.position.y - cy, rz = c.position.z - cz;
+        const d = Math.hypot(rx, ry, rz) || 1;
+        const ux = rx / d, uy = ry / d, uz = rz / d;
+        let tx = c.velocity.x - vx, ty = c.velocity.y - vy, tz = c.velocity.z - vz;
+        const radial = tx * ux + ty * uy + tz * uz;
+        tx -= radial * ux; ty -= radial * uy; tz -= radial * uz;
+        let tl = Math.hypot(tx, ty, tz);
+        if (tl < 1e-3) { tx = -uz; ty = 0; tz = ux; tl = Math.hypot(tx, ty, tz) || 1; }
+        const vc = Math.sqrt(PHYSICS_G * heavyMass / d) * 1.05;
+        c.velocity.set(vx + tx / tl * vc, vy + ty / tl * vc, vz + tz / tl * vc);
+      }
+      return;
+    }
+
+    let maxR = 0;
+    for (const c of live) {
+      const d = Math.hypot(c.position.x - cx, c.position.y - cy, c.position.z - cz) + c.radius;
+      if (d > maxR) maxR = d;
+    }
+    const ELLIP = 1.05;
+    const rad = Math.max(4.5, maxR + 2.0 + Math.random() * 0.6);
+    const angle = Math.random() * Math.PI * 2;
+    const tilt = (Math.random() - 0.5) * 0.5;
+    const v = Math.sqrt(PHYSICS_G * M / rad) * ELLIP;
+    this._spawnCore({
+      role: 'satellite',
+      mass: 0.4 + Math.random() * 0.4,
+      charge: heavy.charge > 0 ? -0.8 : 0.8,
+      radius: 0.45 + Math.random() * 0.35,
+      position: new THREE.Vector3(
+        cx + Math.cos(angle) * rad,
+        cy + Math.sin(tilt) * rad * 0.35,
+        cz + Math.sin(angle) * rad,
+      ),
+      velocity: new THREE.Vector3(vx - Math.sin(angle) * v, vy, vz + Math.cos(angle) * v),
+    });
+  }
+
+  // Collapse the lightest, outermost bodies first so the sun goes last.
+  _removeBodies(n) {
+    const live = this._liveCores();
+    let cx = 0, cy = 0, cz = 0;
+    for (const c of live) { cx += c.position.x; cy += c.position.y; cz += c.position.z; }
+    cx /= live.length; cy /= live.length; cz /= live.length;
+    const dist = c => Math.hypot(c.position.x - cx, c.position.y - cy, c.position.z - cz);
+    live.sort((a, b) => (a.mass - b.mass) || (dist(b) - dist(a)));
+    for (let i = 0; i < n && i < live.length; i++) live[i].beginCollapse();
+  }
+
+  // Keys 1-5: settle the running system toward the new count right away.
+  _applyTargetBodies() {
+    const live = this._liveCores().length;
+    if (live > this.targetBodies) this._removeBodies(live - this.targetBodies);
+    for (let i = live; i < this.targetBodies; i++) this._addBody();
+    this.spawnCooldown = 1.5;
   }
 
   _spawnCore(params) {
@@ -1734,6 +1846,25 @@ class Visualizer {
       }
     }
 
+    if (this.targetBodies > 0) {
+      // Keep the locked count: bodies still age and die, the system refills.
+      // A system that lost its sun gets a new one first, even if that
+      // overshoots the count for a moment; the trim below takes a satellite.
+      const liveCores = this._liveCores();
+      const live = liveCores.length;
+      const hasHeavy = liveCores.some(c => c.mass >= HEAVY_MASS);
+      // Never add while a sun is still collapsing: a new one would spawn on
+      // top of it and the pair would slingshot apart.
+      const heavyGoing = this.cores.some(c => c.phase === 'collapsing' && c.mass >= HEAVY_MASS);
+      if (!heavyGoing && (live < this.targetBodies || (live > 0 && !hasHeavy)) && this.spawnCooldown <= 0) {
+        this._addBody();
+        this.spawnCooldown = 1.5;
+      } else if (live > this.targetBodies) {
+        this._removeBodies(live - this.targetBodies);
+      }
+      return;
+    }
+
     const aliveCount = this.cores.filter(c => c.phase !== 'dead').length;
     if (aliveCount === 0 && this.spawnCooldown <= 0) {
       this._spawnSystem();
@@ -1786,7 +1917,7 @@ class Visualizer {
     const mode = MODES[this.modeIndex];
     const palette = PALETTES[this.paletteIndex];
     const el = document.getElementById('info-text');
-    el.innerHTML = `${mode.name} / ${palette.name}<br>${this.particles.activeCount} / ${this.particleCount} particles${this.nebula.enabled ? ' / nebula' : ''}${this.frozen ? ' / frozen' : ''}`;
+    el.innerHTML = `${mode.name} / ${palette.name}<br>${this.particles.activeCount} / ${this.particleCount} particles${this.targetBodies ? ` / ${this.targetBodies} planets` : ''}${this.nebula.enabled ? ' / nebula' : ''}${this.frozen ? ' / frozen' : ''}`;
   }
 
   _bindEvents() {
@@ -1845,6 +1976,15 @@ class Visualizer {
           break;
         case 'b':
           this.nebula.toggle();
+          this._updateInfo();
+          break;
+        case '0':
+          this.targetBodies = 0;
+          this._updateInfo();
+          break;
+        case '1': case '2': case '3': case '4': case '5':
+          this.targetBodies = Number(key);
+          this._applyTargetBodies();
           this._updateInfo();
           break;
       }
