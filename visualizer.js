@@ -55,6 +55,7 @@ const AUDIO_TUNING = {
   onsetMinLevel:     0.25,   // leveled band must be at least this to hit
   onsetRefractory:   0.12,   // s between hits in one band
   hitTau:            0.09,   // s, hit decay time constant (~6% left after 250 ms)
+  hitFloor:          0.35,   // the softest onset still fires a hit this big
 };
 
 const BAND_NAMES = ['bass', 'mid', 'treble'];
@@ -83,7 +84,8 @@ class AudioAnalyzer {
     this.env = perBand(0);                        // level with attack/release
     this.avg = perBand(0);                        // slow average of level, for onsets
     this.prevLevel = perBand(0);
-    this.hit = perBand(0);                        // 1 on an onset, decays
+    this.hit = perBand(0);                        // the band's level on an onset, decays
+    this.onset = perBand(false);                  // true only on the frame of an onset
     this.sinceHit = perBand(99);
 
     this.rms = 0;
@@ -218,9 +220,11 @@ class AudioAnalyzer {
       this.sinceHit[name] += dt;
       const avg = this.avg[name];
       const rising = level > this.prevLevel[name];
+      this.onset[name] = false;
       if (rising && level > T.onsetMinLevel && level > avg * T.onsetRatio[name]
           && this.sinceHit[name] > T.onsetRefractory) {
-        this.hit[name] = 1;
+        this.onset[name] = true;
+        this.hit[name] = Math.max(T.hitFloor, level);
         this.sinceHit[name] = 0;
       } else {
         this.hit[name] *= hitDecay;
@@ -245,6 +249,7 @@ class AudioAnalyzer {
   getTreble() { return this.active ? this.env.treble : 0; }
   getVolume() { return this.active ? this.loud : 0; }
   getHit(band = 'bass') { return this.active ? this.hit[band] : 0; }
+  getOnset(band = 'bass') { return this.active ? this.onset[band] : false; }
   isBeat()    { return this.getHit('bass') > 0.5; }
 }
 
@@ -273,7 +278,11 @@ class DemoAnalyzer extends AudioAnalyzer {
     const breakdown = (phrase % 4) === 3;
     const swell = 0.5 - 0.5 * Math.cos((t / 16) * Math.PI * 2); // 0 at phrase start, 1 mid-phrase
 
-    const kick = breakdown ? 0 : Math.exp(-beatPhase / 0.1);
+    // Accents: 1 hard, 3 medium, 2 and 4 soft, with a little per-beat jitter.
+    const accent = beatInBar === 0 ? 1.0 : beatInBar === 2 ? 0.8 : 0.55;
+    const jx = Math.sin(beat * 12.9898) * 43758.5453;
+    const jitter = 0.85 + 0.3 * (jx - Math.floor(jx));
+    const kick = breakdown ? 0 : Math.exp(-beatPhase / 0.1) * accent * jitter;
     const snare = (!breakdown && (beatInBar === 1 || beatInBar === 3)) ? Math.exp(-beatPhase / 0.11) : 0;
     const offbeat = beatPhase >= beatLen / 2;
     const eighth = offbeat ? beatPhase - beatLen / 2 : beatPhase;
@@ -653,6 +662,8 @@ const PARTICLE_TUNING = {
   // Launch
   energyQuiet:   0.25,  // at silence, this much of a particle's level becomes launch energy
   energyLoud:    1.0,   // ...and this much at full loudness, so loud passages escape more
+  kickFloor:     0.4,   // energy multiplier for the softest kick...
+  kickGain:      1.0,   // ...plus this much at a full-strength kick: hard kicks throw farther
   energyNoise:   0.3,   // random spread on energy, keeps both populations present
   launchMin:     1.2,   // speed at zero energy
   launchMax:     6.5,   // speed at full energy
@@ -673,7 +684,7 @@ const PARTICLE_TUNING = {
   steer:         10,    // 1/s, how fast velocity turns toward the field line
   shimmer:       0.6,   // sideways wobble speed driven by the particle's FFT bin
   fadeIn:        0.12,  // seconds to full brightness after emission
-  maxAge:        10,    // seconds before a particle is recycled regardless
+  maxAge:        14,    // seconds before a particle is recycled regardless
   boundaryMult:  2.2,   // lines that escape past this many extents recycle
   boundaryMin:   12,    // ...but never closer than this
   // Collapse
@@ -701,8 +712,7 @@ class MagneticParticles {
     this.emitBudget = 0;     // trickle
     this.activeCount = 0;    // particles in flight
     this.burstBudget = 0;    // hit bursts, from flare spots
-    this._lastHit = 0;
-    this._burstBoost = 0;
+    this._burstKick = 0;     // bass level at the last flare
     this._spotsByCore = new Map(); // Core -> flat [x,y,z,...] world directions
     this._dir = [0, 0, 0];
 
@@ -868,16 +878,18 @@ class MagneticParticles {
     return this._dir;
   }
 
-  // Launch energy from the particle's own listener at this instant, scaled
-  // by loudness, plus a little extra on a hit. Hot bins escape, quiet bins
-  // bounce and fall back; quiet passages tilt toward falling back, loud
-  // passages toward interchange, and the noise keeps both present.
-  _launchEnergy(i, audio, boost) {
+  // Launch energy: the particle's own listener at this instant, scaled by
+  // loudness and multiplied by the strength of the kick that threw it. Hot
+  // bins escape, quiet bins bounce and fall back; a hard kick pushes the
+  // whole spread outward, a quiet passage pulls it back, and the noise
+  // keeps both populations present. Energy is also the particle's cruising
+  // speed for the rest of its trip.
+  _launchEnergy(i, audio, kick) {
     const T = PARTICLE_TUNING;
     const amp = audio.getFreqAt(this.listenHz[i]);
     const loud = audio.getVolume();
     const gain = T.energyQuiet + (T.energyLoud - T.energyQuiet) * loud;
-    const e = amp * gain + boost * loud + (Math.random() - 0.5) * T.energyNoise;
+    const e = amp * gain * (T.kickFloor + T.kickGain * kick) + (Math.random() - 0.5) * T.energyNoise;
     return e < 0 ? 0 : e > 1 ? 1 : e;
   }
 
@@ -957,7 +969,7 @@ class MagneticParticles {
     const bassLevel = audio.getBass();
     const loud = audio.getVolume();
     this.burstBudget += this.count * T.hitBurst * (T.hitBurstMin + (1 - T.hitBurstMin) * bassLevel) * (0.5 + 0.5 * loud);
-    this._burstBoost = 0.25 * bassLevel;
+    this._burstKick = bassLevel;
     this._spotsByCore.clear();
     for (const c of this._emitters) {
       const n = T.spotsMin + Math.floor(Math.random() * (T.spotsMax - T.spotsMin + 1));
@@ -1011,10 +1023,9 @@ class MagneticParticles {
     const rate = this.count * (T.trickleBase + volume * T.trickleVolume);
     this.emitBudget = Math.min(this.emitBudget + rate * dt, this.count * T.trickleCap);
 
-    // Burst budget: a bass hit on its rising edge.
-    const hitBass = audio.getHit('bass');
-    if (hitBass > 0.6 && this._lastHit <= 0.6 && canEmit) this._flare(audio, time);
-    this._lastHit = hitBass;
+    // Burst budget: every bass onset, however soft (the burst size and the
+    // launch energy carry the strength).
+    if (audio.getOnset('bass') && canEmit) this._flare(audio, time);
     if (!canEmit) this.burstBudget = 0;
     const burstCap = this.count * T.burstCap;
     let burstThisFrame = 0;
@@ -1039,13 +1050,13 @@ class MagneticParticles {
         if (canEmit && this.burstBudget >= 1 && burstThisFrame < burstCap) {
           const core = this._pickEmitter();
           const d = this._spotDir(core);
-          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, this._burstBoost));
+          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, this._burstKick));
           this.burstBudget -= 1;
           burstThisFrame++;
         } else if (canEmit && this.emitBudget >= 1) {
           const core = this._pickEmitter();
           const d = this._randomDir();
-          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, 0));
+          this._emit(i, core, d[0], d[1], d[2], this._launchEnergy(i, audio, audio.getBass() * 0.6));
           this.emitBudget -= 1;
         } else {
           this.pointSizes[i] = 0;
@@ -1147,14 +1158,16 @@ class MagneticParticles {
 
       // Flight along the field: unit flow direction along (or against) the
       // field, faster where the field is strong so lines rush in and out of
-      // the poles, and faster for particles whose own frequency is hot.
+      // the poles. Launch energy is the cruising speed, so a particle thrown
+      // by a hard kick stays fast for its whole trip and a soft one drifts;
+      // its live bin adds a little on top.
       const freqAmp = audio.getFreqAt(this.listenHz[i]);
       const fmag = Math.sqrt(fx * fx + fy * fy + fz * fz);
       let tx = pullX, ty = pullY, tz = pullZ;
       if (fmag > 1e-6) {
         const inv = this.flowDir[i] / fmag;
         const ux = fx * inv, uy = fy * inv, uz = fz * inv;
-        const s = speed * (0.55 + 0.9 * freqAmp) * (1 + Math.min(1, fmag / T.poleFieldRef) * T.poleBoost);
+        const s = speed * (0.45 + 1.0 * this.energy[i]) * (0.8 + 0.4 * freqAmp) * (1 + Math.min(1, fmag / T.poleFieldRef) * T.poleBoost);
 
         // Shimmer: a small wobble perpendicular to the line, sized by this
         // particle's FFT bin and the treble so highs make the arcs sparkle.
