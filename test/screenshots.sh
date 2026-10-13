@@ -9,12 +9,12 @@ OUT=test/.generated/shots; mkdir -p "$OUT"
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 [ -x "$CHROME" ] || CHROME="$(command -v chromium || command -v google-chrome || true)"
 [ -x "$CHROME" ] || { echo "no Chrome found"; exit 1; }
-PORT=8093
+PORT=${PORT:-8093}
 python3 -m http.server $PORT >/dev/null 2>&1 & SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT
 sleep 1
 LOOKS="$*"
-[ -n "$LOOKS" ] || LOOKS="Classic Wireframe Rays+Only Points Long+Trails Wire+Rays Ghost Dense Comets Anemone Starburst Ribbons Paper"
+[ -n "$LOOKS" ] || LOOKS="Classic Wireframe Rays+Only Points Long+Trails Wire+Rays Ghost Dense Comets Anemone Starburst Attractor Ribbons Paper"
 : > "$OUT/console.log"
 for look in $LOOKS; do
   name=$(echo "$look" | tr '+' '_')

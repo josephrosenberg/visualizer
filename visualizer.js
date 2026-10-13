@@ -33,9 +33,15 @@ const PALETTES = [
 //                // poolQuiet null = PARTICLE_TUNING.poolQuiet
 //   scene:     { nebula: 'auto' | 'on' | 'off', nebulaGain, bloom, fog, background: 'dark' | 'light', stars, haze }
 //                // haze 0..1 lifts the background toward the palette's outer colour (0 = as the palette says)
-//   extras:    []   // passes a look owns: 'links', 'rays' (Starburst), 'shards' (Ribbons, Paper), dials below; 'labels', 'streamlines' (later looks)
+//   extras:    []   // passes a look owns: 'links', 'rays' (Starburst), 'shards' (Ribbons, Paper), dials below; 'orbits', 'streamlines', 'labels' (Attractor, dials below)
 //   links:     { radius, perParticle, maxPairs, opacity }   // the web between neighbouring stars, read only when extras has 'links'
 //   rays:      { count, length, spin, opacity }             // the ray fan per body, read only when extras has 'rays'
+//   orbits:    { ringRadius, dots, dotSize, spin, circleRadius, tilt, precess, opacity, circleOpacity }
+//                // per body: a ring of dots on the world equator and a thin leaning circle, read only when extras has 'orbits'
+//   streamlines: { perBody, steps, step, every, opacity, flow }   // field lines seeded round every body, re-integrated every `every` frames,
+//                // read only when extras has 'streamlines'
+//   labels:    { count, scale, bodyScale, opacity }   // "PARTICLE 0183" tags on a fixed subset of particles and the role in caps beside
+//                // each body, read only when extras has 'labels'
 //   ribbons:   { width, speedRef, twist, roll, taper: 'tip' | 'bulge', shade: 'lit' | 'flat', tint, accentHue }
 //                // the strip renderer, read only when trails.style is 'ribbon': width in world units at full share, speedRef the
 //                // speed at full width, twist = roll per radian of turn, roll in rad/s of the strand's own, tint 0 grey .. 1 palette,
@@ -51,6 +57,9 @@ const LOOK_DEFAULTS = {
   extras:    [],
   links:     { radius: 1.5, perParticle: 3, maxPairs: 7500, opacity: 0.35 },   // no-op: nothing reads it unless extras has 'links'
   rays:      { count: 192, length: 6.0, spin: 0.06, opacity: 0.5 },            // no-op: nothing reads it unless extras has 'rays'
+  orbits:      { ringRadius: 1.12, dots: 160, dotSize: 1.0, spin: 0.25, circleRadius: 1.5, tilt: 0.35, precess: 0.05, opacity: 0.9, circleOpacity: 0.35 },   // no-op: nothing reads it unless extras has 'orbits'
+  streamlines: { perBody: 20, steps: 120, step: 0.12, every: 2, opacity: 0.22, flow: 1.0 },   // no-op: nothing reads it unless extras has 'streamlines'
+  labels:      { count: 48, scale: 1.0, bodyScale: 1.6, opacity: 0.8 },                       // no-op: nothing reads it unless extras has 'labels'
   ribbons:   { width: 0.14, speedRef: 4.0, twist: 1.0, roll: 0.5, taper: 'tip', shade: 'lit', tint: 0.35, accentHue: 0.3 },   // no-op: nothing reads it unless trails.style is 'ribbon'
   shards:    { perHit: 6, speed: 3.5, life: 0.6, length: 0.8, width: 0.12, opacity: 0.45 },                                  // no-op: nothing reads it unless extras has 'shards'
 };
@@ -120,6 +129,31 @@ const LOOKS = [
     links:     { radius: 2.0, perParticle: 3, maxPairs: 7500, opacity: 0.35 },
     rays:      { count: 192, length: 6.0, spin: 0.06, opacity: 0.5 },
   }),
+  // Hodgin's "inner logic" frame, the ATTRACTOR still: a fiery, boiling body
+  // with a bright equatorial glow, a dense ring of dots turning on its
+  // equator and a thin leaning orbit circle outside it; the field drawn as
+  // faint lines that leave the sources and bend into the sinks like a
+  // magnetosphere diagram, with pulses running along them; particles as
+  // short streaks along those lines; a sparse constellation web between
+  // neighbours; tiny "PARTICLE 0183" tags on a fixed subset of them and the
+  // body's role in caps beside each body. No trails: the field lines are
+  // the line work. Launches are capped so most particles stay near their
+  // body; the ring and the orbit are drawn, not simulated. Orbits,
+  // streamlines and labels are passes the look owns, named in extras and
+  // dialled in their own sections. Ember and Solar are the palettes of the
+  // reference frame.
+  makeLook('Attractor', {
+    planet:      { skin: 'hot', landing: 'spot', spotLife: 1.2 },
+    particles:   { sprite: 'streak', size: 2.0, hueScatter: 0.06 },
+    trails:      { style: 'none' },
+    sim:         { emission: 'even', energy: 0.65, speed: 0.8, trickle: 1.5, poolQuiet: 0.5 },
+    scene:       { nebula: 'on', nebulaGain: 0.9, bloom: 1.15, stars: false, haze: 0.04 },
+    extras:      ['orbits', 'streamlines', 'links', 'labels'],
+    links:       { radius: 1.6, perParticle: 2, maxPairs: 7500, opacity: 0.18 },
+    orbits:      { ringRadius: 1.12, dots: 160, dotSize: 1.0, spin: 0.25, circleRadius: 1.5, tilt: 0.35, precess: 0.05, opacity: 0.9, circleOpacity: 0.35 },
+    streamlines: { perBody: 20, steps: 120, step: 0.12, every: 2, opacity: 0.22, flow: 1.0 },
+    labels:      { count: 48, scale: 1.0, bodyScale: 1.6, opacity: 0.8 },
+  }),
   // Hodgin's grey ribbons: every trail a thin flat strip of tape that widens
   // with speed, twists as its particle turns and catches a key light as it
   // does, radiating from white-hot bodies; soft glowing dots at the heads,
@@ -160,8 +194,8 @@ const LOOKS = [
 const MODES = LOOKS;
 
 // Planet skins and particle sprites by name; the shaders branch on the index.
-const PLANET_SKINS = { nebula: 0, glass: 1, rings: 2, silhouette: 3, paper: 4 };
-const SPRITES = { disc: 0, comet: 1, star: 2, flat: 3 };
+const PLANET_SKINS = { nebula: 0, glass: 1, rings: 2, silhouette: 3, paper: 4, hot: 5 };
+const SPRITES = { disc: 0, comet: 1, star: 2, flat: 3, streak: 4 };
 
 // ─── Palette from an image ───────────────────────────────────────────────────
 
@@ -578,7 +612,7 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform vec3 uColorCore;
   uniform vec3 uColorInner;
   uniform vec3 uColorOuter;
-  uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass, 2 rings, 3 silhouette, 4 paper
+  uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass, 2 rings, 3 silhouette, 4 paper, 5 hot
   uniform float uSpotLife;    // seconds a landing spot (kind 2) lingers on the glass and silhouette skins
   uniform float uRadius;      // body radius, so a spot keeps its world size on a small body
   uniform vec4 uEvents[MAX_EVENTS];      // xyz: object-space direction, w: start time
@@ -729,6 +763,59 @@ const PLANET_FRAGMENT = /* glsl */ `
     return color;
   }
 
+  // Skin 'hot' (Attractor): a dark body under a boiling crust of domain-warped
+  // value noise in object space (so it turns with the mesh): dark plates and
+  // glowing cracks in the palette's inner colour, the hottest filaments
+  // lifted toward white and sparkling with the treble. A warm rim and a
+  // hairline limb. The equatorial glow is measured on the WORLD normal so it
+  // sits under the orbits pass's dot ring (world equatorial plane) however
+  // the mesh has tilted, hottest where the band meets the limb like a ring
+  // seen edge-on. The crust is kept under the bloom threshold so only the
+  // filaments, the band and the limb bloom and the body stays a textured
+  // sphere, not a white blob. Landings (kind 2) are brief white-hot
+  // pinpoints in the particle's colour; kinds 0 and 1 are not drawn.
+  vec3 hotSkin(float NdotV) {
+    vec3 on = normalize(vObjNormal);
+    vec3 Nw = normalize(vWorldNormal);
+    float t = uTime * 0.06;
+    vec3 p = on * 3.0;
+    vec2 warp = vec2(vnoise(p + vec3(t, 0.0, 0.0)), vnoise(p + vec3(0.0, t, 7.1))) - 0.5;
+    p += vec3(warp.x, warp.y, warp.x - warp.y) * 1.1;
+    float n = vnoise(p) * 0.55 + vnoise(p * 2.1 + vec3(0.0, t * 1.7, 0.0)) * 0.3 + vnoise(p * 4.7 - vec3(t, 0.0, 0.0)) * 0.15;
+    float crust = smoothstep(0.38, 0.72, n);               // dark plates (0) to glowing cracks (1)
+    float fil   = smoothstep(0.66, 0.84, n);               // the hottest filaments
+    float pulse = 1.0 + uBass * 0.4 + uHit * 0.7;
+    float rim   = pow(1.0 - NdotV, 2.5);                   // warm edge
+    float limb  = pow(1.0 - NdotV, 10.0);                  // hairline at the silhouette
+    float eq    = exp(-Nw.y * Nw.y * 45.0);                // band about the world equator, ~9 degrees wide
+    float belt  = exp(-Nw.y * Nw.y * 5.0);                 // broad warmth around it
+    vec3 ember = uColorOuter, fire = uColorInner, white = mix(fire, vec3(1.0), 0.6);
+    vec3 color = ember * (0.06 + 0.10 * NdotV);                                  // dark body, barely lit toward the camera
+    color += mix(ember, fire, crust) * (0.08 + 0.42 * crust) * pulse;            // crust
+    color += white * fil * (0.45 + 0.35 * uTreble) * pulse;                      // filaments
+    color += mix(fire, white, 0.3) * rim * 0.45 * pulse;                         // rim
+    color += vec3(1.0) * limb * 0.25;                                            // limb
+    color += fire * belt * 0.15 * pulse;                                         // warmth about the equator
+    color += mix(fire, vec3(1.0), 0.5) * eq * (0.45 + 0.8 * rim) * pulse;        // the equatorial glow, hottest at the limb
+    float lifeSpan = max(uSpotLife, 0.01);
+    for (int i = 0; i < MAX_EVENTS; i++) {
+      vec4 e = uEvents[i];
+      float age = uTime - e.w;
+      if (age < 0.0 || age > lifeSpan) continue;
+      if (uEventKinds[i] < 1.5) continue;                  // landings only
+      float c = dot(on, e.xyz);
+      if (c < 0.85) continue;                              // more than ~0.55 rad away
+      float life = age / lifeSpan;
+      float d    = length(on - e.xyz) * uRadius;           // chord length, world units
+      float hot  = exp(-d * d * 900.0);                    // pinpoint, ~0.03 units
+      float halo = exp(-d * d * 90.0);                     // small halo, ~0.1 units
+      float fade = (1.0 - life) * (1.0 - life) + exp(-age * 6.0);
+      float win  = smoothstep(0.85, 0.95, c);              // dies before the cutoff, no seam
+      color += (uEventColors[i] * halo * 0.8 + vec3(1.0) * hot) * fade * win;
+    }
+    return color;
+  }
+
   // Skin 4, paper (Paper): an unlit flat disc, a mid tone between the
   // palette's outer and core colours, with a drawn outline along the limb
   // (the outer ~8% of the projected radius, measured on the world normal so
@@ -746,6 +833,11 @@ const PLANET_FRAGMENT = /* glsl */ `
     vec3 N = normalize(vNormal);
     vec3 V = normalize(vViewDir);
     float NdotV = max(dot(N, V), 0.0);
+    if (abs(uSkin - ${PLANET_SKINS.hot}.0) < 0.5) {
+      vec3 Nw = normalize(vWorldNormal);
+      gl_FragColor = vec4(hotSkin(max(dot(Nw, V), 0.0)), 1.0);
+      return;
+    }
     if (uSkin > 3.5) {
       vec3 Nw = normalize(vWorldNormal);
       gl_FragColor = vec4(paperSkin(max(dot(Nw, V), 0.0)), 1.0);
@@ -910,6 +1002,118 @@ const RAY_FRAGMENT = /* glsl */ `
     float a = fall * uOpacity * (0.5 + 0.5 * uVolume) * (0.6 + 0.4 * vSeed);
     vec3 col = mix(mix(uColorInner, vec3(1.0), 0.35), uColorOuter, vT);
     gl_FragColor = vec4(col * a, 1.0);                         // additive, like the trails
+  }
+`;
+
+// ─── Orbits (Attractor extras: 'orbits') ─────────────────────────────────────
+
+// A ring of dots on a body's world equator (the plane the hot skin's
+// equatorial glow sits in) and a thin orbit circle outside it, leaning by
+// the body's index and precessing slowly. Two shared unit geometries in the
+// XZ plane, built once from a fixed-seed PRNG (Math.random untouched, so
+// the planet and particle RNG sequences stay as they were): a Points for
+// the dots, laid down at the golden angle so any prefix of the buffer is an
+// even ring and orbits.dots is a draw range, and a LineSegments for the
+// circle. Every core owns one of each, placed at the body and scaled by
+// radius x lifecycle x the look's radius factor, like the ray fan, so
+// spawn, collapse and destroy come free. The dots turn about world y on the
+// sim time (F stops them), twinkle on their own seed and breathe with the
+// bass; one bright arc travels round the circle. Nothing is uploaded per
+// frame. Hidden under every look whose extras do not name 'orbits'.
+const ORBIT_DOTS = 160;         // dots the shared ring holds; orbits.dots is a draw range into it
+const ORBIT_SEGMENTS = 128;
+let ORBIT_DOT_GEOMETRY = null, ORBIT_CIRCLE_GEOMETRY = null;
+function orbitDotGeometry() {
+  if (ORBIT_DOT_GEOMETRY) return ORBIT_DOT_GEOMETRY;
+  let s = 0x2545f491;   // mulberry32 with its own fixed seed
+  const rnd = () => { s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const n = ORBIT_DOTS, pos = new Float32Array(n * 3), seed = new Float32Array(n), size = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    const a = k * 2.399963 + (rnd() - 0.5) * 0.06;       // golden angle: any prefix is an even ring
+    const r = 1 + (rnd() - 0.5) * 0.06;                  // a thin band, not a hairline
+    pos[k * 3] = Math.cos(a) * r; pos[k * 3 + 1] = (rnd() - 0.5) * 0.03; pos[k * 3 + 2] = Math.sin(a) * r;
+    seed[k] = rnd();
+    size[k] = 0.6 + Math.pow(rnd(), 2.0) * 1.2;          // most small, a few bright
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+  g.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+  ORBIT_DOT_GEOMETRY = g;
+  return g;
+}
+function orbitCircleGeometry() {
+  if (ORBIT_CIRCLE_GEOMETRY) return ORBIT_CIRCLE_GEOMETRY;
+  const n = ORBIT_SEGMENTS, pos = new Float32Array(n * 6), ang = new Float32Array(n * 2);
+  for (let k = 0; k < n; k++) {
+    const a0 = k / n * Math.PI * 2, a1 = (k + 1) / n * Math.PI * 2, k6 = k * 6;
+    pos[k6] = Math.cos(a0); pos[k6 + 2] = Math.sin(a0); pos[k6 + 3] = Math.cos(a1); pos[k6 + 5] = Math.sin(a1);
+    ang[k * 2] = a0; ang[k * 2 + 1] = a1;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aAngle', new THREE.BufferAttribute(ang, 1));
+  ORBIT_CIRCLE_GEOMETRY = g;
+  return g;
+}
+
+const ORBIT_DOT_VERTEX = `
+  attribute float aSeed;
+  attribute float aSize;
+  uniform float uTime;
+  uniform float uBass;
+  uniform float uHit;
+  uniform float uDotSize;
+  uniform float uRadius;   // body radius: the object is scaled by it, so a sun's dots are heavier than a satellite's, but not by the ratio
+  varying float vGlow;
+  void main() {
+    // The object carries the body's position, the ring radius and the spin;
+    // a dot keeps its pixel size. Each twinkles on its own seed and the
+    // whole ring breathes with the bass and jumps on a hit.
+    vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+    float twinkle = 0.75 + 0.25 * sin(uTime * (2.0 + aSeed * 3.0) + aSeed * 50.0);
+    vGlow = twinkle * (1.0 + uBass * 0.4 + uHit * 0.8);
+    gl_PointSize = uDotSize * aSize * (0.6 + 0.4 * uRadius) * (120.0 / -mvPos.z);
+    gl_Position = projectionMatrix * mvPos;
+  }
+`;
+
+const ORBIT_DOT_FRAGMENT = `
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  uniform float uVolume;
+  varying float vGlow;
+  void main() {
+    vec2 p = (gl_PointCoord - 0.5) * 2.0;
+    float r2 = dot(p, p);
+    float hot  = exp(-r2 * 30.0);                               // the dot
+    float halo = exp(-r2 * 4.0);                                // its glow, gone by the edge
+    float a = (hot + halo * 0.3) * vGlow * uOpacity * (0.6 + 0.4 * uVolume);
+    if (a < 0.004) discard;
+    gl_FragColor = vec4(mix(uColor, vec3(1.0), 0.55 * hot) * a, 1.0);   // additive, like the rays: the colour carries the alpha
+  }
+`;
+
+const ORBIT_CIRCLE_VERTEX = `
+  attribute float aAngle;
+  uniform float uTime;
+  uniform float uArc;
+  varying float vBright;
+  void main() {
+    // One bright arc travels round the circle; the rest is a hairline.
+    float arc = pow(0.5 + 0.5 * cos(aAngle - uTime * uArc), 8.0);
+    vBright = 0.3 + 0.7 * arc;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const ORBIT_CIRCLE_FRAGMENT = `
+  uniform vec3 uColor;
+  uniform float uCircleOpacity;
+  uniform float uVolume;
+  varying float vBright;
+  void main() {
+    gl_FragColor = vec4(mix(uColor, vec3(1.0), 0.4) * vBright * uCircleOpacity * (0.6 + 0.4 * uVolume), 1.0);   // additive
   }
 `;
 
@@ -1137,6 +1341,39 @@ class Core {
     this.rays.rotation.x = (((index * 0.618034) % 1) - 0.5) * 0.8;   // each fan spins about its own tilted axis
     this._raySpin = 0;
     scene.add(this.rays);
+
+    // Orbits (extras 'orbits'): a ring of dots on the world equator and a
+    // thin circle outside it, hidden until a look asks for them. Both
+    // materials share one uniforms object; the circle's lean comes from the
+    // body's index, not from the RNG.
+    this.orbitUniforms = {
+      uTime:          { value: 0 },
+      uBass:          { value: 0 },
+      uHit:           { value: 0 },
+      uVolume:        { value: 0 },
+      uColor:         { value: new THREE.Color(0x6699ff) },
+      uOpacity:       { value: LOOK_DEFAULTS.orbits.opacity },
+      uCircleOpacity: { value: LOOK_DEFAULTS.orbits.circleOpacity },
+      uDotSize:       { value: LOOK_DEFAULTS.orbits.dotSize },
+      uArc:           { value: LOOK_DEFAULTS.orbits.spin * 2 },
+      uRadius:        { value: this.radius },
+    };
+    this.orbitDotMaterial = new THREE.ShaderMaterial({
+      vertexShader: ORBIT_DOT_VERTEX, fragmentShader: ORBIT_DOT_FRAGMENT, uniforms: this.orbitUniforms,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    this.orbitCircleMaterial = new THREE.ShaderMaterial({
+      vertexShader: ORBIT_CIRCLE_VERTEX, fragmentShader: ORBIT_CIRCLE_FRAGMENT, uniforms: this.orbitUniforms,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    this.orbitRing = new THREE.Points(orbitDotGeometry(), this.orbitDotMaterial);
+    this.orbitCircle = new THREE.LineSegments(orbitCircleGeometry(), this.orbitCircleMaterial);
+    this.orbitCircle.rotation.order = 'YXZ';               // lean about x, then precess about world y
+    this._orbitTilt = (((index * 0.618034 + 0.3) % 1) - 0.5) * 2;   // -1..1 from the index; orbits.tilt scales it
+    for (const o of [this.orbitRing, this.orbitCircle]) { o.visible = false; o.frustumCulled = false; scene.add(o); }
+    this._orbits = LOOK_DEFAULTS.orbits;
+    this._orbitSpin = 0;
+    this._orbitPrecess = 0;
   }
 
   // Gravitational mass used by the n-body sim. Fades linearly to zero across
@@ -1214,6 +1451,8 @@ class Core {
         this.alive = false;
         this.mesh.visible = false;
         this.rays.visible = false;
+        this.orbitRing.visible = false;
+        this.orbitCircle.visible = false;
       }
     }
 
@@ -1240,6 +1479,17 @@ class Core {
       const u = this.rayUniforms;
       u.uTime.value = time; u.uBass.value = audio.getBass(); u.uHit.value = hit; u.uVolume.value = audio.getVolume();
     }
+    if (this.orbitRing.visible) {
+      const s = Math.max(0.001, this.scaleT) * this.radius, o = this._orbits;
+      this.orbitRing.position.copy(this.position);
+      this.orbitRing.scale.setScalar(s * o.ringRadius);
+      this.orbitRing.rotation.y = time * this._orbitSpin;         // sim time: stops under F with the shader time
+      this.orbitCircle.position.copy(this.position);
+      this.orbitCircle.scale.setScalar(s * o.circleRadius);
+      this.orbitCircle.rotation.y = time * this._orbitPrecess;
+      const ou = this.orbitUniforms;
+      ou.uTime.value = time; ou.uBass.value = audio.getBass(); ou.uHit.value = hit; ou.uVolume.value = audio.getVolume();
+    }
   }
 
   // Start collapsing now, from the current scale, so a body that's still
@@ -1257,6 +1507,10 @@ class Core {
     this.material.dispose();
     this.scene.remove(this.rays);
     this.rayMaterial.dispose();                            // the fan geometry is shared, it stays
+    this.scene.remove(this.orbitRing);
+    this.scene.remove(this.orbitCircle);
+    this.orbitDotMaterial.dispose();                       // the ring geometries are shared too, they stay
+    this.orbitCircleMaterial.dispose();
   }
 
   applyLook(look, palette) {
@@ -1285,6 +1539,24 @@ class Core {
     this.rayUniforms.uOpacity.value = r.opacity;
     this.rayUniforms.uColorInner.value.set(palette.rayInner);
     this.rayUniforms.uColorOuter.value.set(palette.rayOuter);
+
+    // Orbits: the dot ring and the circle, dialled by the look. The dot
+    // geometry is shared, so its draw range (orbits.dots) is the current
+    // look's for every body.
+    const o = look.orbits;
+    const orbitsOn = look.extras.includes('orbits') && this.alive;
+    this._orbits = o;
+    this.orbitRing.visible = orbitsOn;
+    this.orbitCircle.visible = orbitsOn;
+    this.orbitRing.geometry.setDrawRange(0, Math.min(ORBIT_DOTS, o.dots));
+    this._orbitSpin = (this.index % 2 ? -1 : 1) * o.spin;          // neighbours turn opposite ways
+    this._orbitPrecess = (this.index % 2 ? 1 : -1) * o.precess;
+    this.orbitCircle.rotation.x = this._orbitTilt * o.tilt;
+    this.orbitUniforms.uOpacity.value = o.opacity;
+    this.orbitUniforms.uCircleOpacity.value = o.circleOpacity;
+    this.orbitUniforms.uDotSize.value = o.dotSize;
+    this.orbitUniforms.uArc.value = o.spin * 2;
+    this.orbitUniforms.uColor.value.set(palette.rayInner);
   }
 }
 
@@ -1468,16 +1740,16 @@ class MagneticParticles {
           vDir = vec2(0.0, 1.0);
           vTail = 0.0;
           vSpike = 0.0;
-          if (uSprite > 1.5) {
+          if (abs(uSprite - 2.0) < 0.5) {
             // Star: a lens cross on the bigger, brighter points only (near,
             // a loud bin, a large sizeMul), as the flares in the reference
             // sit on the brightest stars. Sized in device pixels.
             float px = size * (250.0 / -mvPos.z);
             float lum = max(color.r, max(color.g, color.b));
             vSpike = smoothstep(10.0, 22.0, px) * smoothstep(0.4, 0.9, lum);
-          } else if (uSprite > 0.5) {
-            // Where the particle will be in 1/20 s, projected, gives the tail
-            // direction on screen. x is scaled by the aspect (P[1][1] / P[0][0])
+          } else if (abs(uSprite - 1.0) < 0.5 || abs(uSprite - ${SPRITES.streak}.0) < 0.5) {
+            // Comet and streak: where the particle will be in 1/20 s, projected,
+            // gives the tail direction on screen. x is scaled by the aspect (P[1][1] / P[0][0])
             // so the direction is right inside the square point sprite.
             vec4 ahead = projectionMatrix * (mvPos + modelViewMatrix * vec4(velocity * 0.05, 0.0));
             vec2 d = ahead.xy / max(ahead.w, 0.0001) - clip.xy / max(clip.w, 0.0001);
@@ -1490,7 +1762,7 @@ class MagneticParticles {
         }
       `,
       fragmentShader: `
-        uniform float uSprite;   // SPRITES index: 0 disc, 1 comet, 2 star, 3 flat
+        uniform float uSprite;   // SPRITES index: 0 disc, 1 comet, 2 star, 3 flat, 4 streak
         varying vec3 vColor;
         varying vec2 vDir;
         varying float vTail;
@@ -1518,6 +1790,30 @@ class MagneticParticles {
             float core = 1.0 - smoothstep(0.0, 0.35, d);
             float alpha = disc * 0.85 + core * 0.6;
             gl_FragColor = vec4(vColor * (1.0 + core * 0.6), alpha);
+            return;
+          }
+          if (abs(uSprite - ${SPRITES.streak}.0) < 0.5) {
+            // Streak (Attractor): a small hot point in a soft glow with a
+            // short thin dash behind it along the direction of travel,
+            // thinner and shorter than the comet's tail (60% of the sprite
+            // radius, a thread by its end), so a particle reads as a mote
+            // moving along a field line; just the dot when it moves along
+            // the view axis (vTail 0).
+            vec2 p = (gl_PointCoord - 0.5) * 2.0;
+            float r2 = dot(p, p);
+            float along = dot(p, -vDir);                        // positive behind the head
+            float across = abs(p.x * vDir.y - p.y * vDir.x);    // distance from the travel axis
+            float head = exp(-r2 * 60.0);                       // hot point, ~0.13 of the sprite
+            float glow = exp(-r2 * 12.0);                       // soft halo
+            float tl = clamp(along / 0.6, 0.0, 1.0);            // 0 at the head, 1 at the dash's end
+            float width = mix(0.07, 0.012, tl);
+            float dash = (1.0 - tl) * (1.0 - tl)
+                       * (1.0 - smoothstep(0.0, width, across))
+                       * smoothstep(-0.05, 0.05, along) * vTail;
+            float alpha = head + glow * 0.3 + dash * 0.85;
+            if (alpha < 0.005) discard;
+            vec3 rgb = vColor * (glow * 0.45 + dash + head * 0.5) + vec3(head) * 1.1;
+            gl_FragColor = vec4(rgb, min(alpha, 1.0));
             return;
           }
           if (uSprite > 1.5) {
@@ -1717,8 +2013,9 @@ class MagneticParticles {
 
     this.spriteScale = look.particles.size;
     this.hueScatter = look.particles.hueScatter;
-    this.pointMat.uniforms.uSprite.value = SPRITES[look.particles.sprite] ?? 0;
-    this._cometSprite = this.pointMat.uniforms.uSprite.value === SPRITES.comet;
+    const sprite = SPRITES[look.particles.sprite] ?? 0;
+    this.pointMat.uniforms.uSprite.value = sprite;
+    this._cometSprite = sprite === SPRITES.comet || sprite === SPRITES.streak;   // both orient by the velocity attribute
     this._spotEvents = look.planet.landing === 'spot';
     this.points.visible = true;
 
@@ -2719,6 +3016,384 @@ class MagneticParticles {
   }
 }
 
+// ─── Field lines (Attractor extras: 'streamlines') ───────────────────────────
+
+// The magnetosphere diagram: the field the particles steer along, drawn.
+// Every alive body seeds perBody lines on a Fibonacci sphere just off its
+// surface, each integrated AWAY from the body (along B off a positive core,
+// against it off a negative one, so lines run source to sink like the
+// particles) with midpoint steps of `step` world units, up to `steps` of
+// them, stopping on any surface, past the particle boundary or where the
+// field dies. The field is the particle loop's own sum of
+// effectiveCharge * r / |r|^3 with its softening (the loop keeps its own
+// inline sum; this pass has its own). Integrated every `every` frames (a
+// body moves a few hundredths of a unit in that time) into one fixed buffer
+// drawn through a draw range, uploading only the vertices written. Per
+// vertex aInfo carries t along the line, whether it landed and a signed
+// step count: the shader keeps a landed line lit to the surface, fades one
+// that left the frame to nothing by its tip, dims the set when the music is
+// quiet and sends pulses along every line from source to sink. No
+// Math.random anywhere in it.
+const STREAM_MAX_LINES = 256;   // 8 bodies x 32 seeds: a 5-planet lock plus bodies still collapsing
+const STREAM_MAX_STEPS = 200;   // streamlines.steps is clamped to it
+function fibonacciSphere(n) {
+  const out = new Float32Array(n * 3), ga = Math.PI * (3 - Math.sqrt(5));
+  for (let k = 0; k < n; k++) {
+    const y = 1 - (k + 0.5) * 2 / n, r = Math.sqrt(1 - y * y), a = ga * k;
+    out[k * 3] = Math.cos(a) * r; out[k * 3 + 1] = y; out[k * 3 + 2] = Math.sin(a) * r;
+  }
+  return out;
+}
+
+const STREAM_VERTEX = `
+  attribute vec3 aInfo;    // x: 0 at the root on the body, 1 at the line's last vertex; y: 1 if the line ended on a body; z: signed step, for the pulses
+  uniform float uOpacity;
+  uniform float uVolume;
+  uniform float uTime;
+  uniform float uFlow;
+  uniform vec3 uColorInner;
+  uniform vec3 uColorOuter;
+  varying vec3 vColor;
+  void main() {
+    float t = aInfo.x;
+    float root  = 0.45 + 0.55 * (1.0 - t);                                  // brighter near its body
+    float tip   = mix(1.0 - smoothstep(0.55, 1.0, t), 1.0, aInfo.y);        // landed: lit to the surface; left the frame: fades out
+    float pulse = 0.75 + 0.25 * sin(aInfo.z * 0.5 - uTime * 6.0 * uFlow);   // ~1.4 units/s along the line, source to sink
+    float a = root * tip * pulse * uOpacity * (0.6 + 0.4 * uVolume);
+    vColor = mix(uColorInner, uColorOuter, t * 0.6) * a;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const STREAM_FRAGMENT = `
+  varying vec3 vColor;
+  void main() { gl_FragColor = vec4(vColor, 1.0); }   // additive, like the trails
+`;
+
+class FieldLines {
+  constructor(scene, cores) {
+    this.scene = scene;
+    this.cores = cores;
+    this.enabled = false;
+    this.look = LOOK_DEFAULTS.streamlines;
+    this.frame = 0;
+    this.lines = 0;
+    this.lineStart = new Int32Array(STREAM_MAX_LINES + 1);   // first vertex of each line, plus the end
+    this.lineCore = new Array(STREAM_MAX_LINES).fill(null);
+    const v = STREAM_MAX_LINES * STREAM_MAX_STEPS * 2;
+    this.positions = new Float32Array(v * 3);
+    this.info = new Float32Array(v * 3);
+    this.geo = new THREE.BufferGeometry();
+    this.posAttr = new THREE.BufferAttribute(this.positions, 3);
+    this.infoAttr = new THREE.BufferAttribute(this.info, 3);
+    this.geo.setAttribute('position', this.posAttr);
+    this.geo.setAttribute('aInfo', this.infoAttr);
+    this.geo.setDrawRange(0, 0);
+    this.uniforms = {
+      uOpacity: { value: LOOK_DEFAULTS.streamlines.opacity }, uVolume: { value: 0 }, uTime: { value: 0 },
+      uFlow: { value: LOOK_DEFAULTS.streamlines.flow },
+      uColorInner: { value: new THREE.Color(0x6699ff) }, uColorOuter: { value: new THREE.Color(0x2244aa) },
+    };
+    this.material = new THREE.ShaderMaterial({
+      vertexShader: STREAM_VERTEX, fragmentShader: STREAM_FRAGMENT, uniforms: this.uniforms,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    this.mesh = new THREE.LineSegments(this.geo, this.material);
+    this.mesh.visible = false;
+    this.mesh.frustumCulled = false;   // the bounding sphere would be computed once, from zeros
+    scene.add(this.mesh);
+    this.seeds = fibonacciSphere(LOOK_DEFAULTS.streamlines.perBody);
+    this._alive = [];
+  }
+
+  applyLook(look, palette) {
+    this.look = look.streamlines;
+    this.enabled = look.extras.includes('streamlines');
+    this.mesh.visible = this.enabled;
+    if (!this.enabled) { this.geo.setDrawRange(0, 0); this.lines = 0; }
+    const per = Math.max(1, Math.min(32, Math.floor(this.look.perBody)));
+    if (this.seeds.length !== per * 3) this.seeds = fibonacciSphere(per);
+    this.frame = 0;                                        // integrate on the next frame
+    this.uniforms.uOpacity.value = this.look.opacity;
+    this.uniforms.uFlow.value = this.look.flow;
+    this.uniforms.uColorInner.value.set(palette.rayInner);
+    this.uniforms.uColorOuter.value.set(palette.rayOuter);
+  }
+
+  // ctx: { barycenter: Vector3, extent: number, time: number }, as the particles get.
+  update(audio, ctx) {
+    if (!this.enabled) return;
+    this.uniforms.uVolume.value = audio.getVolume();
+    this.uniforms.uTime.value = ctx.time;
+    if (this.frame++ % Math.max(1, this.look.every) !== 0) return;
+    const L = this.look, T = PARTICLE_TUNING;
+    const alive = this._alive; alive.length = 0;
+    for (const c of this.cores) if (c.alive) alive.push(c);
+    const na = alive.length;
+    const per = this.seeds.length / 3, steps = Math.max(1, Math.min(STREAM_MAX_STEPS, Math.floor(L.steps))), h = L.step;
+    const bx = ctx.barycenter.x, by = ctx.barycenter.y, bz = ctx.barycenter.z;
+    const boundary = Math.max(T.boundaryMin, ctx.extent * T.boundaryMult), b2 = boundary * boundary;
+    const pos = this.positions, info = this.info, seeds = this.seeds, start = this.lineStart;
+    let v = 0, lines = 0;
+    for (let ci = 0; ci < na; ci++) {
+      const c = alive[ci], q = c.effectiveCharge;
+      if (Math.abs(q) < 0.01) continue;                    // a body still spawning or nearly gone has no lines yet
+      const r0 = c.radius * Math.max(c.scaleT, 0.05) * 1.08;
+      const sign = q > 0 ? 1 : -1;                         // away from the body: along B off a source, against it off a sink
+      for (let s = 0; s < per && lines < STREAM_MAX_LINES; s++) {
+        let x = c.position.x + seeds[s * 3] * r0, y = c.position.y + seeds[s * 3 + 1] * r0, z = c.position.z + seeds[s * 3 + 2] * r0;
+        const base = v;
+        let landed = 0, k = 0;
+        for (; k < steps; k++) {
+          // The field at (x, y, z): the particle loop's sum over every alive core.
+          let fx = 0, fy = 0, fz = 0;
+          for (let oi = 0; oi < na; oi++) {
+            const o = alive[oi];
+            const dx = x - o.position.x, dy = y - o.position.y, dz = z - o.position.z;
+            const d = Math.sqrt(dx * dx + dy * dy + dz * dz + 0.05), qf = o.effectiveCharge / (d * d * d);
+            fx += qf * dx; fy += qf * dy; fz += qf * dz;
+          }
+          let m = Math.sqrt(fx * fx + fy * fy + fz * fz);
+          if (m < 1e-6) break;
+          // Midpoint: half a step along the unit field, the field there, the full step.
+          const hh = sign * h * 0.5 / m;
+          const mx = x + fx * hh, my = y + fy * hh, mz = z + fz * hh;
+          fx = 0; fy = 0; fz = 0;
+          for (let oi = 0; oi < na; oi++) {
+            const o = alive[oi];
+            const dx = mx - o.position.x, dy = my - o.position.y, dz = mz - o.position.z;
+            const d = Math.sqrt(dx * dx + dy * dy + dz * dz + 0.05), qf = o.effectiveCharge / (d * d * d);
+            fx += qf * dx; fy += qf * dy; fz += qf * dz;
+          }
+          m = Math.sqrt(fx * fx + fy * fy + fz * fz);
+          if (m < 1e-6) break;
+          const hs = sign * h / m;
+          const nx = x + fx * hs, ny = y + fy * hs, nz = z + fz * hs;
+          const v3 = v * 3;
+          pos[v3] = x; pos[v3 + 1] = y; pos[v3 + 2] = z; pos[v3 + 3] = nx; pos[v3 + 4] = ny; pos[v3 + 5] = nz;
+          info[v3 + 2] = k * sign; info[v3 + 5] = (k + 1) * sign;
+          v += 2; x = nx; y = ny; z = nz;
+          const ex = x - bx, ey = y - by, ez = z - bz;
+          if (ex * ex + ey * ey + ez * ez > b2) break;      // left the frame
+          for (let oi = 0; oi < na; oi++) {
+            const o = alive[oi];
+            if (o === c && k < 1) continue;                  // the root is just off its own surface
+            const dx = x - o.position.x, dy = y - o.position.y, dz = z - o.position.z, sr = o.radius * Math.max(o.scaleT, 0.05);
+            if (dx * dx + dy * dy + dz * dz < sr * sr) { landed = 1; break; }
+          }
+          if (landed) break;
+        }
+        const nv = v - base, segs = Math.max(1, nv / 2);
+        for (let j = 0; j < nv; j++) { const j3 = (base + j) * 3; info[j3] = ((j >> 1) + (j & 1)) / segs; info[j3 + 1] = landed; }
+        start[lines] = base; this.lineCore[lines] = c; lines++;
+      }
+    }
+    start[lines] = v; this.lines = lines;
+    this.posAttr.clearUpdateRanges(); this.posAttr.addUpdateRange(0, Math.max(3, v * 3)); this.posAttr.needsUpdate = true;
+    this.infoAttr.clearUpdateRanges(); this.infoAttr.addUpdateRange(0, Math.max(3, v * 3)); this.infoAttr.needsUpdate = true;
+    this.geo.setDrawRange(0, v);
+  }
+}
+
+// ─── Labels (Attractor extras: 'labels') ─────────────────────────────────────
+
+// "PARTICLE 0183" beside a capped subset of the particles and the body's
+// role in caps (ATTRACTOR for a sun) beside each body. One canvas atlas is
+// drawn once at construction, at LABEL_ATLAS_SCALE px per CSS px for retina
+// text: LABEL_WORDS role rows, then LABEL_MAX_PARTICLES particle rows whose
+// four-digit ids come from a fixed-seed PRNG and belong to the slot, so the
+// atlas never changes and nothing is rasterised per frame. Labels are
+// camera-facing quads in one fixed buffer (not point sprites: gl_PointSize
+// caps would clip the text and a sprite vanishes whole at the screen edge):
+// the vertex shader projects the anchor, stands the quad off to its right
+// by the anchor's projected radius plus a gap and sizes it in device
+// pixels, a HUD that reads the same at any distance. Slot k follows
+// particle k * LABEL_STRIDE: the low indices are emitted and re-emitted
+// first, so the tagged set is nearly always in flight and never churns; a
+// tag fades in once its particle has cleared the surface and out where it
+// landed. The body words are stood off past the limb and fade with the
+// lifecycle. Drawn with the depth test (no depth write), so a tag behind a
+// planet is hidden by it, as in the reference frame. No DOM. Headless (no
+// document) the atlas is null: the pass lays out its quads and draws
+// nothing.
+const LABEL_ATLAS_SCALE = 2;                                   // atlas px per CSS px
+const LABEL_ATLAS_W = 128 * LABEL_ATLAS_SCALE, LABEL_CELL_H = 16 * LABEL_ATLAS_SCALE;
+const LABEL_WORDS = ['ATTRACTOR', 'SATELLITE', 'PARTNER'];      // atlas rows 0..2, by role
+const LABEL_ROLE_ROW = { central: 0, satellite: 1, partner: 2 };
+const LABEL_MAX_PARTICLES = 48;                                // tag slots; labels.count is clamped to it
+const LABEL_MAX_BODIES = 8;
+const LABEL_STRIDE = 2;                                        // slot k tags particle k * 2: under 96, in flight under any count (min 100)
+const LABEL_ROWS = LABEL_WORDS.length + LABEL_MAX_PARTICLES;
+function buildLabelAtlas() {
+  if (typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = LABEL_ATLAS_W; canvas.height = LABEL_CELL_H * LABEL_ROWS;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle';
+  const widths = new Float32Array(LABEL_ROWS);
+  let s = 0x1f123bb5;   // mulberry32, fixed seed: the ids are the same every session
+  const rnd = () => { s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  for (let r = 0; r < LABEL_ROWS; r++) {
+    const body = r < LABEL_WORDS.length;
+    ctx.font = `bold ${(body ? 13 : 10) * LABEL_ATLAS_SCALE}px Helvetica, Arial, sans-serif`;
+    const text = body ? LABEL_WORDS[r] : `PARTICLE ${String(Math.floor(rnd() * 10000)).padStart(4, '0')}`;
+    ctx.fillText(text, LABEL_ATLAS_SCALE, r * LABEL_CELL_H + LABEL_CELL_H / 2);
+    widths[r] = Math.min(LABEL_ATLAS_W, Math.ceil(ctx.measureText(text).width) + 2 * LABEL_ATLAS_SCALE);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.flipY = false;                                       // rows count from the top, like the shader's v
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter; texture.magFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping; texture.wrapT = THREE.ClampToEdgeWrapping;
+  return { texture, widths };
+}
+
+const LABEL_VERTEX = `
+  attribute vec2 aCorner;    // 0..1 across the quad, (0,0) bottom left
+  attribute vec4 aInfo;      // x: atlas row, y: the row's text width in atlas px, z: fade, w: world units to stand off (a body's radius, 0 for a particle)
+  attribute float aScale;    // 1 for a particle tag, labels.bodyScale for a body word
+  uniform vec2 uViewport;    // drawing buffer, device px
+  uniform float uRows;
+  uniform float uAtlasW;
+  uniform float uCellH;
+  uniform float uScale;      // device px per atlas px: labels.scale x pixel ratio / the atlas scale
+  varying vec2 vUv;
+  varying float vFade;
+  varying float vBody;
+  void main() {
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    vec4 clip = projectionMatrix * mv;
+    float pxPerUnit = projectionMatrix[1][1] * uViewport.y * 0.5 / max(-mv.z, 0.001);   // device px per world unit at the anchor's depth
+    float s = uScale * aScale;
+    vec2 sizePx = vec2(aInfo.y, uCellH) * s;
+    vec2 offPx = vec2(aInfo.w * pxPerUnit * 1.06 + 6.0 * s, -uCellH * 0.5 * s);        // just off the limb (or the particle), centred on its height
+    clip.xy += (offPx + aCorner * sizePx) * 2.0 / uViewport * clip.w;
+    gl_Position = clip;
+    vUv = vec2(aCorner.x * aInfo.y / uAtlasW, (aInfo.x + 1.0 - aCorner.y) / uRows);
+    vFade = aInfo.z * step(mv.z, 0.0);                                                    // nothing behind the camera
+    vBody = 1.0 - step(${LABEL_WORDS.length}.0 - 0.5, aInfo.x);
+  }
+`;
+const LABEL_FRAGMENT = `
+  uniform sampler2D uAtlas;
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  varying vec2 vUv;
+  varying float vFade;
+  varying float vBody;
+  void main() {
+    float a = texture2D(uAtlas, vUv).a * vFade * uOpacity;
+    if (a < 0.01) discard;
+    vec3 col = mix(mix(uColor, vec3(1.0), 0.35), vec3(1.0), vBody);   // tags in the palette, body words white
+    gl_FragColor = vec4(col * a, 1.0);                                  // additive, like the rays
+  }
+`;
+
+class ParticleLabels {
+  constructor(scene, particles) {
+    this.scene = scene;
+    this.particles = particles;
+    this.enabled = false;
+    this.look = LOOK_DEFAULTS.labels;
+    this.quads = 0;
+    this.particleLabels = 0;
+    const n = this.max = LABEL_MAX_PARTICLES + LABEL_MAX_BODIES;
+    this.slotFade = new Float32Array(LABEL_MAX_PARTICLES);
+    this.slotAge = new Float32Array(LABEL_MAX_PARTICLES);      // the particle's age last seen: a drop means a new particle in the slot
+    this.slotPos = new Float32Array(LABEL_MAX_PARTICLES * 3);  // where it was last seen, so a tag fades out in place
+    this.quadSlot = new Int16Array(n);                         // the slot each drawn quad belongs to (-1 for a body word)
+    const atlas = buildLabelAtlas();
+    this.atlas = atlas ? atlas.texture : null;
+    this.widths = atlas ? atlas.widths : new Float32Array(LABEL_ROWS).fill(64 * LABEL_ATLAS_SCALE);
+    this.positions = new Float32Array(n * 12);
+    this.infos = new Float32Array(n * 16);
+    this.scales = new Float32Array(n * 4);
+    const corners = new Float32Array(n * 8), index = new Uint16Array(n * 6);
+    for (let k = 0; k < n; k++) { corners.set([0, 0, 1, 0, 1, 1, 0, 1], k * 8); index.set([k * 4, k * 4 + 1, k * 4 + 2, k * 4, k * 4 + 2, k * 4 + 3], k * 6); }
+    this.geo = new THREE.BufferGeometry();
+    this.attrs = {
+      position: new THREE.BufferAttribute(this.positions, 3),
+      aCorner: new THREE.BufferAttribute(corners, 2),
+      aInfo: new THREE.BufferAttribute(this.infos, 4),
+      aScale: new THREE.BufferAttribute(this.scales, 1),
+    };
+    for (const [name, a] of Object.entries(this.attrs)) this.geo.setAttribute(name, a);
+    this.geo.setIndex(new THREE.BufferAttribute(index, 1));
+    this.geo.setDrawRange(0, 0);
+    this.uniforms = {
+      uAtlas: { value: this.atlas }, uViewport: { value: new Float32Array([1, 1]) },
+      uRows: { value: LABEL_ROWS }, uAtlasW: { value: LABEL_ATLAS_W }, uCellH: { value: LABEL_CELL_H },
+      uScale: { value: 1 / LABEL_ATLAS_SCALE }, uColor: { value: new THREE.Color(0x6699ff) }, uOpacity: { value: LOOK_DEFAULTS.labels.opacity },
+    };
+    this.material = new THREE.ShaderMaterial({
+      vertexShader: LABEL_VERTEX, fragmentShader: LABEL_FRAGMENT, uniforms: this.uniforms,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    this.mesh = new THREE.Mesh(this.geo, this.material);
+    this.mesh.visible = false;
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 2;                                 // after the particles and the lines
+    scene.add(this.mesh);
+  }
+
+  applyLook(look, palette, pixelRatio = 1) {
+    this.look = look.labels;
+    this.enabled = look.extras.includes('labels');
+    this.mesh.visible = this.enabled;
+    if (!this.enabled) { this.geo.setDrawRange(0, 0); this.quads = 0; this.particleLabels = 0; this.slotFade.fill(0); }
+    this.uniforms.uScale.value = this.look.scale * pixelRatio / LABEL_ATLAS_SCALE;
+    this.uniforms.uOpacity.value = this.look.opacity;
+    this.uniforms.uColor.value.set(palette.rayInner);
+  }
+
+  _quad(k, x, y, z, row, fade, radius, scale, slot) {
+    const p = this.positions, nf = this.infos, k12 = k * 12, k16 = k * 16, k4 = k * 4, w = this.widths[row];
+    for (let c = 0; c < 4; c++) {
+      p[k12 + c * 3] = x; p[k12 + c * 3 + 1] = y; p[k12 + c * 3 + 2] = z;
+      nf[k16 + c * 4] = row; nf[k16 + c * 4 + 1] = w; nf[k16 + c * 4 + 2] = fade; nf[k16 + c * 4 + 3] = radius;
+      this.scales[k4 + c] = scale;
+    }
+    this.quadSlot[k] = slot;
+  }
+
+  // viewW, viewH: the drawing buffer size in device pixels.
+  update(dt, cores, viewW, viewH) {
+    if (!this.enabled) return;
+    const P = this.particles, pos = P.positions, L = this.look;
+    const want = Math.max(1, Math.min(LABEL_MAX_PARTICLES, Math.floor(L.count)));
+    const up = dt * 4, down = dt * 2.5;
+    let k = 0;
+    for (let s = 0; s < want; s++) {
+      const i = s * LABEL_STRIDE, s3 = s * 3;
+      const on = i < P.count && P.active[i] === 1 && P.ages[i] > 0.15;   // joins once the particle has cleared the surface
+      let f = this.slotFade[s];
+      if (on) {
+        if (P.ages[i] < this.slotAge[s]) f = 0;                          // a new particle in the slot: start over at its place
+        this.slotAge[s] = P.ages[i];
+        f = Math.min(1, f + up);
+        const i3 = i * 3; this.slotPos[s3] = pos[i3]; this.slotPos[s3 + 1] = pos[i3 + 1]; this.slotPos[s3 + 2] = pos[i3 + 2];
+      } else f = Math.max(0, f - down);
+      this.slotFade[s] = f;
+      if (f <= 0) continue;
+      this._quad(k++, this.slotPos[s3], this.slotPos[s3 + 1], this.slotPos[s3 + 2], LABEL_WORDS.length + s, f, 0, 1, s);
+    }
+    this.particleLabels = k;
+    for (const c of cores) {
+      if (!c.alive || k >= this.max) continue;
+      const row = LABEL_ROLE_ROW[c.role] ?? (c.mass >= HEAVY_MASS ? 0 : 1);
+      const sc = Math.max(c.scaleT, 0.001);
+      this._quad(k++, c.position.x, c.position.y, c.position.z, row, Math.min(1, sc), c.radius * sc, L.bodyScale, -1);
+    }
+    this.quads = k;
+    const vp = this.uniforms.uViewport.value; vp[0] = viewW; vp[1] = viewH;
+    const verts = Math.max(1, k * 4);
+    for (const [name, a] of Object.entries(this.attrs)) {
+      if (name === 'aCorner') continue;
+      a.clearUpdateRanges(); a.addUpdateRange(0, verts * a.itemSize); a.needsUpdate = true;
+    }
+    this.geo.setDrawRange(0, k * 6);
+  }
+}
+
 // ─── Nebula Background ───────────────────────────────────────────────────────
 
 class Nebula {
@@ -3292,6 +3967,10 @@ class Visualizer {
 
   _initParticles() {
     this.particles = new MagneticParticles(this.scene, this.cores, this.particleCount);
+    // Scene-level extras passes (Attractor): the field lines from the
+    // bodies and the labels. Both hidden until a look names them.
+    this.fieldLines = new FieldLines(this.scene, this.cores);
+    this.labels = new ParticleLabels(this.scene, this.particles);
   }
 
   _initNebula() {
@@ -3318,6 +3997,8 @@ class Visualizer {
     for (const core of this.cores) core.applyLook(look, palette);
     this.particles.applyLook(look, palette);
     this.nebula.applyLook(look, palette);
+    this.fieldLines.applyLook(look, palette);
+    this.labels.applyLook(look, palette, this.renderer.getPixelRatio());
 
     const effectiveCount = Math.min(5000, Math.round(this.particleCount * look.particles.countMul));
     this.particles.setCount(effectiveCount);
@@ -3619,12 +4300,14 @@ class Visualizer {
     const hue = 0.6 + treble * 0.1;
     this.centralLight.color.setHSL(hue, 0.5, 0.5 + volume * 0.3);
 
-    this.particles.update(this.audio, dt, {
-      barycenter: this._barycenter,
-      extent: this._extent,
-      died,
-      time: simTime,
-    });
+    const ctx = { barycenter: this._barycenter, extent: this._extent, died, time: simTime };
+    this.particles.update(this.audio, dt, ctx);
+
+    // Extras at the scene level: field lines from the bodies (on the
+    // positions physics just set) and the labels (on the positions the
+    // particles just took; sized in device pixels, so the drawing buffer).
+    this.fieldLines.update(this.audio, ctx);
+    this.labels.update(dt, this.cores, this.renderer.domElement.width, this.renderer.domElement.height);
 
     // Nebula
     this.nebula.update(this.audio);
