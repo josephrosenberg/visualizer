@@ -265,7 +265,7 @@ function lightBackground(palette) {
     h = (mx === r ? ((g - b) / d + 6) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4) / 6;
     s = Math.min(0.30, d / (1 - Math.abs(mx + mn - 1)));
   }
-  const l = 0.47, q = l + s - l * s, p = 2 * l - q;
+  const l = 0.47, q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
   const ch = t => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 0.5 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
   return (Math.round(ch(h + 1 / 3) * 255) << 16) | (Math.round(ch(h) * 255) << 8) | Math.round(ch(h - 1 / 3) * 255);
 }
@@ -1768,7 +1768,7 @@ class MagneticParticles {
         varying float vTail;
         varying float vSpike;
         void main() {
-          if (uSprite > 2.5) {
+          if (abs(uSprite - ${SPRITES.flat}.0) < 0.5) {
             // Flat (Paper): an opaque disc in the particle's flat colour with
             // a drawn outline, lighter on a dark fill and darker on a light
             // one, anti-aliased at the rim. Nothing glows; drawn with normal
@@ -1992,6 +1992,14 @@ class MagneticParticles {
     // screen; its strand goes with it, since the index never walks above
     // count and a held strand would reappear if the count grew back.
     for (let i = next; i < this.count; i++) { this._sleep(i); this.trailLen[i] = 0; }
+    // A ribbon strand is drawn by birth, not trailLen, so blank every slot of
+    // the slept strands and send the whole birth buffer: the caps _sleep
+    // queued here, between frames, would be dropped by the next update's
+    // clearUpdateRanges.
+    if (this._ribbons && next < this.count) {
+      for (let i = next; i < this.count; i++) for (let sl = 0; sl < RIBBON_POINTS; sl++) { const v = (sl * this.maxCount + i) * 2; this.rbBirth[v] = this.rbBirth[v + 1] = RIBBON_NONE; }
+      this._rbWipe = true;
+    }
     this.count = next;
   }
 
@@ -2878,12 +2886,16 @@ class MagneticParticles {
         const c = this._tmpColorParticle.lerpColors(this.outerColor, this.innerColor, freqAmp);
         cr = c.r; cg = c.g; cb = c.b;
       }
-      const gain = this._flatColor ? Math.min(1, this.ages[i] / T.fadeIn) : bright;   // flat: the colour as is once faded in; gain === bright otherwise
+      // Flat (Paper): the colour as stored. Under normal blending a scaled
+      // colour is a dark disc, not a faint one, so the fade-in is a size
+      // ramp instead; gain === bright for the other looks.
+      const fadeUp = Math.min(1, this.ages[i] / T.fadeIn);
+      const gain = this._flatColor ? 1 : bright;
       this.pointColors[i3]     = cr * gain;
       this.pointColors[i3 + 1] = cg * gain;
       this.pointColors[i3 + 2] = cb * gain;
 
-      this.pointSizes[i] = T.pointSize * this.spriteScale * (0.6 + freqAmp * 0.8) * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]) * (0.5 + 0.5 * bright);
+      this.pointSizes[i] = T.pointSize * this.spriteScale * (0.6 + freqAmp * 0.8) * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]) * (0.5 + 0.5 * bright) * (this._flatColor ? fadeUp : 1);
 
       // Trail point for this frame: the line ring, or the ribbon ring under
       // the ribbon style (trailLen counts for both)
@@ -3109,7 +3121,7 @@ class FieldLines {
     this.look = look.streamlines;
     this.enabled = look.extras.includes('streamlines');
     this.mesh.visible = this.enabled;
-    if (!this.enabled) { this.geo.setDrawRange(0, 0); this.lines = 0; }
+    if (!this.enabled) { this.geo.setDrawRange(0, 0); this.lines = 0; this._alive.length = 0; this.lineCore.fill(null); }   // no dead body stays reachable
     const per = Math.max(1, Math.min(32, Math.floor(this.look.perBody)));
     if (this.seeds.length !== per * 3) this.seeds = fibonacciSphere(per);
     this.frame = 0;                                        // integrate on the next frame
@@ -3969,8 +3981,8 @@ class Visualizer {
     this.particles = new MagneticParticles(this.scene, this.cores, this.particleCount);
     // Scene-level extras passes (Attractor): the field lines from the
     // bodies and the labels. Both hidden until a look names them.
-    this.fieldLines = new FieldLines(this.scene, this.cores);
-    this.labels = new ParticleLabels(this.scene, this.particles);
+    this.fieldLines = null;   // built by the first look whose extras name 'streamlines'
+    this.labels = null;       // built by the first look whose extras name 'labels'
   }
 
   _initNebula() {
@@ -3997,8 +4009,10 @@ class Visualizer {
     for (const core of this.cores) core.applyLook(look, palette);
     this.particles.applyLook(look, palette);
     this.nebula.applyLook(look, palette);
-    this.fieldLines.applyLook(look, palette);
-    this.labels.applyLook(look, palette, this.renderer.getPixelRatio());
+    if (!this.fieldLines && look.extras.includes('streamlines')) this.fieldLines = new FieldLines(this.scene, this.cores);
+    if (this.fieldLines) this.fieldLines.applyLook(look, palette);
+    if (!this.labels && look.extras.includes('labels')) this.labels = new ParticleLabels(this.scene, this.particles);
+    if (this.labels) this.labels.applyLook(look, palette, this.renderer.getPixelRatio());
 
     const effectiveCount = Math.min(5000, Math.round(this.particleCount * look.particles.countMul));
     this.particles.setCount(effectiveCount);
@@ -4306,8 +4320,8 @@ class Visualizer {
     // Extras at the scene level: field lines from the bodies (on the
     // positions physics just set) and the labels (on the positions the
     // particles just took; sized in device pixels, so the drawing buffer).
-    this.fieldLines.update(this.audio, ctx);
-    this.labels.update(dt, this.cores, this.renderer.domElement.width, this.renderer.domElement.height);
+    if (this.fieldLines) this.fieldLines.update(this.audio, ctx);
+    if (this.labels) this.labels.update(dt, this.cores, this.renderer.domElement.width, this.renderer.domElement.height);
 
     // Nebula
     this.nebula.update(this.audio);

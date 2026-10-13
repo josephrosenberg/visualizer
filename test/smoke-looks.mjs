@@ -384,6 +384,15 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
   check(!cores[0].orbitRing.visible && !cores[0].orbitCircle.visible && !fl.mesh.visible && fl.geo.drawRange.count === 0 && !lb.mesh.visible && lb.geo.drawRange.count === 0 && !p.linkLines.visible && !p._cometSprite, 'Classic hides the orbits, the field lines, the labels and the links, draws none of them and stops the velocity upload');
 }
 
+// ── Sprite dispatch: every index past star is tested by equality in the fragment shader, so a new sprite can't be swallowed by an earlier range test ──
+{
+  const p = new MagneticParticles(scene, [mkCore(0, 1, 2, V(0, 0, 0))], 100);
+  const src = p.pointMat.fragmentShader;
+  const missing = Object.entries(SPRITES).filter(([, idx]) => idx >= 3 && !src.includes(`abs(uSprite - ${idx}.0) < 0.5`)).map(([name]) => name);
+  const ranges = (src.match(/uSprite\s*>\s*([0-9.]+)/g) || []).filter(m => parseFloat(m.split('>')[1]) > 1.5);
+  check(missing.length === 0 && ranges.length === 0, `sprite dispatch: ${Object.keys(SPRITES).length} sprites, every index past star tested by equality (missing: ${missing.join(',') || 'none'}; range tests above star: ${ranges.join(',') || 'none'})`);
+}
+
 // ── Palette from pixels ──
 {
   const w = 64, h = 64, data = new Uint8ClampedArray(w * h * 4);
