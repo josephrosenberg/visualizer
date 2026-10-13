@@ -24,16 +24,20 @@ const PALETTES = [
 //
 //   planet:    { skin, visible, wireframe, landing: 'ripple' | 'spot', spotLife }
 //   particles: { sprite, size, hueScatter, countMul }
-//   trails:    { style: 'line' | 'comet' | 'none', seconds, opacity }
-//   sim:       { charge: 'none' | 'frequency' | 'random', coulomb, separation, chargeGain }
-//   scene:     { nebula: 'auto' | 'on' | 'off', bloom, fog, background: 'dark' | 'light' }
+//   trails:    { style: 'line' | 'comet' | 'hair' | 'none', seconds, opacity, drain }
+//   sim:       { charge: 'none' | 'frequency' | 'random', coulomb, separation, chargeGain,
+//                emission: 'spots' | 'even', energy, speed, trickle, poolQuiet }
+//                // energy, speed, trickle multiply PARTICLE_TUNING (1.0 = as tuned);
+//                // poolQuiet null = PARTICLE_TUNING.poolQuiet
+//   scene:     { nebula: 'auto' | 'on' | 'off', nebulaGain, bloom, fog, background: 'dark' | 'light', stars }
 //   extras:    []   // 'links', 'labels', 'streamlines', 'rays' (later looks)
 const LOOK_DEFAULTS = {
   planet:    { skin: 'nebula', visible: true, wireframe: false, landing: 'ripple', spotLife: 3.0 },
   particles: { sprite: 'disc', size: 1.0, hueScatter: 0, countMul: 1.0 },
-  trails:    { style: 'line', seconds: 0.5, opacity: 0.6 },
-  sim:       { charge: 'none', coulomb: 0, separation: 0, chargeGain: 1.0 },
-  scene:     { nebula: 'auto', bloom: 1.0, fog: true, background: 'dark' },
+  trails:    { style: 'line', seconds: 0.5, opacity: 0.6, drain: false },
+  sim:       { charge: 'none', coulomb: 0, separation: 0, chargeGain: 1.0,
+               emission: 'spots', energy: 1.0, speed: 1.0, trickle: 1.0, poolQuiet: null },
+  scene:     { nebula: 'auto', nebulaGain: 1.0, bloom: 1.0, fog: true, background: 'dark', stars: true },
   extras:    [],
 };
 
@@ -67,11 +71,25 @@ const LOOKS = [
     trails:    { style: 'comet', seconds: 1.0, opacity: 0.7 },
     scene:     { bloom: 1.25 },
   }),
+  // Hodgin's Magnetosphere anemones: dark bodies with a ring nucleus (a
+  // white-hot centre, a bright ring, a dark gap, faint outer rings) and
+  // thousands of hair-thin strands that mostly hug their body. Launches are
+  // capped low (fountains and slow escapes, no comets), bursts erupt from the
+  // whole surface, separation fans the strands, every strand ends in a small
+  // bright dot and drains into the body when it lands, and the nebula fills
+  // the frame. Aurora is the palette of the reference frame.
+  makeLook('Anemone', {
+    planet:    { skin: 'rings' },
+    particles: { sprite: 'disc', size: 0.6, hueScatter: 0.08, countMul: 4.0 },
+    trails:    { style: 'hair', seconds: 3.0, opacity: 0.3, drain: true },
+    sim:       { charge: 'random', coulomb: 0, separation: 1.0, emission: 'even', energy: 0.6, speed: 0.5, trickle: 2.5, poolQuiet: 0.5 },
+    scene:     { nebula: 'on', nebulaGain: 1.6, bloom: 1.1, stars: false },
+  }),
 ];
 const MODES = LOOKS;
 
 // Planet skins and particle sprites by name; the shaders branch on the index.
-const PLANET_SKINS = { nebula: 0, glass: 1 };
+const PLANET_SKINS = { nebula: 0, glass: 1, rings: 2 };
 const SPRITES = { disc: 0, comet: 1 };
 
 // ─── Palette from an image ───────────────────────────────────────────────────
@@ -467,7 +485,7 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform vec3 uColorCore;
   uniform vec3 uColorInner;
   uniform vec3 uColorOuter;
-  uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass
+  uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass, 2 rings
   uniform float uSpotLife;    // seconds a landing spot (kind 2) lingers on the glass skin
   uniform float uRadius;      // body radius, so a spot keeps its world size on a small body
   uniform vec4 uEvents[MAX_EVENTS];      // xyz: object-space direction, w: start time
@@ -550,10 +568,45 @@ const PLANET_FRAGMENT = /* glsl */ `
     return color;
   }
 
+  // Skin 2, ring nucleus (Anemone): a near-black body whose centre, as the
+  // camera sees it, is a set of concentric rings: a white-hot core, a bright
+  // palette ring where its glow ends, a dark gap and two faint outer rings.
+  // Measured as the projected radius of the disc (sine of the angle between
+  // the world normal and the view) so the rings face the camera, stay
+  // concentric on any body and never spin with the mesh. The rest of the
+  // body is a silhouette against the hair and the nebula. Surface events
+  // are not drawn: hair lands without a mark.
+  float ringBand(float x, float centre, float sharp) {
+    float d = (x - centre) * sharp;
+    return exp(-d * d);
+  }
+  vec3 ringSkin(float NdotV) {
+    float rp = sqrt(max(0.0, 1.0 - NdotV * NdotV));      // 0 at the disc centre, 1 at the limb
+    float pulse = 1.0 + uBass * 0.4 + uHit * 0.8;
+    float hot   = exp(-rp * rp * 600.0);                   // white-hot centre, ~4% of the radius
+    float core  = exp(-rp * rp * 90.0);                    // palette glow around it, ~10%
+    float ring1 = ringBand(rp, 0.15, 30.0);                // bright ring where the glow ends
+    float ring2 = ringBand(rp, 0.30, 45.0) * 0.18;         // faint ring past the dark gap
+    float ring3 = ringBand(rp, 0.42, 55.0) * 0.08;         // fainter still
+    float limb  = pow(max(0.0, 1.0 - NdotV), 12.0) * 0.06; // the faintest edge, so the silhouette has a rim
+    vec3 color = uColorOuter * 0.02;                                   // near-black body
+    color += vec3(1.0) * hot * 3.0 * pulse;
+    color += mix(uColorInner, vec3(1.0), 0.4) * core * 1.2 * pulse;
+    color += uColorInner * ring1 * 1.5 * pulse;
+    color += uColorInner * (ring2 + ring3) * pulse;
+    color += uColorInner * limb;
+    return color;
+  }
+
   void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(vViewDir);
     float NdotV = max(dot(N, V), 0.0);
+    if (uSkin > 1.5) {
+      vec3 Nw = normalize(vWorldNormal);
+      gl_FragColor = vec4(ringSkin(max(dot(Nw, V), 0.0)), 1.0);
+      return;
+    }
     if (uSkin > 0.5) {
       vec3 Nw = normalize(vWorldNormal);
       gl_FragColor = vec4(glassSkin(Nw, V, max(dot(Nw, V), 0.0)), 1.0);
@@ -832,7 +885,7 @@ class Core {
 //
 // All speeds are scene units per second, rates are particles per second.
 // These are the knobs to turn while watching Demo Mode.
-const TRAIL_POINTS = 200;  // ring slots per particle; at 60 fps that's 3.3 s of trail
+const TRAIL_POINTS = 400;  // ring slots per particle: 6.7 s of trail at 60 fps, 3.3 s at 120
 
 const PARTICLE_TUNING = {
   // Emission
@@ -887,6 +940,18 @@ const PARTICLE_TUNING = {
   kickDecay:     1.2,   // seconds for a burst to hand control back to the field
 };
 
+// Cell visiting order for the separation walk: the particle's own cell, then
+// the six face neighbours, the twelve edges, the eight corners (flat xyz
+// triples). The walk stops at sepMax neighbours, so in a dense cloud it has
+// to look at the nearest cells first or the capped sum leans toward
+// whichever corner the loop starts in.
+const SEP_CELL_ORDER = (() => {
+  const cells = [];
+  for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) cells.push([x, y, z]);
+  cells.sort((a, b) => (Math.abs(a[0]) + Math.abs(a[1]) + Math.abs(a[2])) - (Math.abs(b[0]) + Math.abs(b[1]) + Math.abs(b[2])));
+  return Int8Array.from(cells.flat());
+})();
+
 class MagneticParticles {
   constructor(scene, cores, initialCount) {
     this.scene = scene;
@@ -933,6 +998,8 @@ class MagneticParticles {
     this.hueInner = new Float32Array(n * 3); // per-particle hue-shifted palette colours, filled in applyLook
     this.hueOuter = new Float32Array(n * 3);
     this.trailLen = new Uint16Array(n);   // trail points written since emission, capped
+    this.trailHead = new Uint16Array(n);  // ring slot of each particle's newest trail point
+    this._drain = false;                  // trails.drain: a landed particle's strand stays and fades out instead of vanishing
     this._gridHeads = new Int32Array(4096);
     this._gridNext = new Int32Array(n);
     this._sep = [0, 0, 0];
@@ -1070,11 +1137,17 @@ class MagneticParticles {
         uniform float uNow;
         uniform float uSeconds;
         uniform float uOpacity;
-        uniform float uStyle;    // 0 linear fade (line), 1 comet: cubic taper with a hot tip
+        uniform float uStyle;    // 0 linear fade (line), 1 comet: cubic taper with a hot tip, 2 hair: even strand, soft root
         varying vec3 vColor;
         void main() {
           float fade = clamp(1.0 - (uNow - birth) / uSeconds, 0.0, 1.0);
-          if (uStyle > 0.5) {
+          if (uStyle > 1.5) {
+            // Hair: near-even brightness along the strand (the square root
+            // holds it up until the root, which then dies softly), with the
+            // newest few points lifted so the strand joins its tip dot.
+            float tip = max(0.0, 1.0 - (1.0 - fade) * 14.0);
+            vColor = (color * sqrt(fade) + vec3(tip * 0.4)) * uOpacity;
+          } else if (uStyle > 0.5) {
             // Brightness falls off fast behind the head so a 1 px line reads
             // as a streak that thins out; the newest ~11% is lifted toward
             // white so it joins the sprite's hot head.
@@ -1107,8 +1180,10 @@ class MagneticParticles {
 
   setCount(n) {
     const next = Math.max(100, Math.min(this.maxCount, n));
-    // Anything above the new count goes dormant so it isn't left frozen on screen.
-    for (let i = next; i < this.count; i++) this._sleep(i);
+    // Anything above the new count goes dormant so it isn't left frozen on
+    // screen; its strand goes with it, since the index never walks above
+    // count and a held strand would reappear if the count grew back.
+    for (let i = next; i < this.count; i++) { this._sleep(i); this.trailLen[i] = 0; }
     this.count = next;
   }
 
@@ -1121,8 +1196,12 @@ class MagneticParticles {
     this.trailSeconds = Math.max(0.05, tr.seconds);
     this.trailMat.uniforms.uSeconds.value = this.trailSeconds;
     this.trailMat.uniforms.uOpacity.value = tr.opacity;
-    this.trailMat.uniforms.uStyle.value = tr.style === 'comet' ? 1 : 0;
+    this.trailMat.uniforms.uStyle.value = tr.style === 'comet' ? 1 : tr.style === 'hair' ? 2 : 0;
     this.trailLines.visible = style !== 'none';
+    // Draining strands belong to dormant particles; a look without draining
+    // drops them now so they can't come back when the particle is reused.
+    this._drain = tr.drain === true;
+    if (!this._drain) for (let i = 0; i < this.maxCount; i++) if (!this.active[i]) this.trailLen[i] = 0;
 
     this.spriteScale = look.particles.size;
     this.hueScatter = look.particles.hueScatter;
@@ -1187,25 +1266,21 @@ class MagneticParticles {
     const cx = Math.floor(px * inv), cy = Math.floor(py * inv), cz = Math.floor(pz * inv);
     const qi = Math.abs(this.charge[i]) || 0.3;
     let fx = 0, fy = 0, fz = 0, found = 0;
-    for (let ox = -1; ox <= 1 && found < T.sepMax; ox++) {
-      for (let oy = -1; oy <= 1 && found < T.sepMax; oy++) {
-        for (let oz = -1; oz <= 1 && found < T.sepMax; oz++) {
-          let j = this._gridHeads[this._cellHash(cx + ox, cy + oy, cz + oz)];
-          while (j !== -1 && found < T.sepMax) {
-            if (j !== i) {
-              const j3 = j * 3;
-              const dx = px - this.positions[j3], dy = py - this.positions[j3 + 1], dz = pz - this.positions[j3 + 2];
-              const d2 = dx * dx + dy * dy + dz * dz;
-              if (d2 < h2 && d2 > 1e-6) {
-                const d = Math.sqrt(d2);
-                const f = k * qi * (Math.abs(this.charge[j]) || 0.3) / (d2 + 0.05);
-                fx += dx / d * f; fy += dy / d * f; fz += dz / d * f;
-                found++;
-              }
-            }
-            j = this._gridNext[j];
+    for (let c = 0; c < 81 && found < T.sepMax; c += 3) {
+      let j = this._gridHeads[this._cellHash(cx + SEP_CELL_ORDER[c], cy + SEP_CELL_ORDER[c + 1], cz + SEP_CELL_ORDER[c + 2])];
+      while (j !== -1 && found < T.sepMax) {
+        if (j !== i) {
+          const j3 = j * 3;
+          const dx = px - this.positions[j3], dy = py - this.positions[j3 + 1], dz = pz - this.positions[j3 + 2];
+          const d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 < h2 && d2 > 1e-6) {
+            const d = Math.sqrt(d2);
+            const f = k * qi * (Math.abs(this.charge[j]) || 0.3) / (d2 + 0.05);
+            fx += dx / d * f; fy += dy / d * f; fz += dz / d * f;
+            found++;
           }
         }
+        j = this._gridNext[j];
       }
     }
     this._sep[0] = fx; this._sep[1] = fy; this._sep[2] = fz;
@@ -1276,7 +1351,9 @@ class MagneticParticles {
     const loud = audio.getVolume();
     const gain = T.energyQuiet + (T.energyLoud - T.energyQuiet) * loud;
     const e = amp * gain * (T.kickFloor + T.kickGain * kick) + (Math.random() - 0.5) * T.energyNoise;
-    return e < 0 ? 0 : e > 1 ? 1 : e;
+    // The look's energy dial caps the whole range (clamp first, then scale),
+    // so 0.6 means no launch faster than 60% of the way to launchMax.
+    return (e < 0 ? 0 : e > 1 ? 1 : e) * this.look.sim.energy;
   }
 
   // Release a dormant particle off a core's surface at direction n (unit),
@@ -1343,7 +1420,9 @@ class MagneticParticles {
     this.active[i] = 0;
     this.brightness[i] = 0;
     this.pointSizes[i] = 0;
-    this.trailLen[i] = 0;
+    // Under a draining look the strand stays in the ring and fades out by
+    // age from the root; otherwise it goes with the particle.
+    if (!this._drain) this.trailLen[i] = 0;
   }
 
   // One-time outward impulse for everything a dying core had gathered in.
@@ -1386,6 +1465,7 @@ class MagneticParticles {
     this.burstBudget += this.count * T.hitBurst * (T.hitBurstMin + (1 - T.hitBurstMin) * bassLevel) * (0.5 + 0.5 * loud);
     this._burstKick = bassLevel;
     this._spotsByCore.clear();
+    if (this.look.sim.emission === 'even') return;   // the burst erupts from the whole surface: no spots, no flare rings
     for (const c of this._emitters) {
       const n = T.spotsMin + Math.floor(Math.random() * (T.spotsMax - T.spotsMin + 1));
       const r = c.radius * Math.max(c.scaleT, 0.05);
@@ -1440,7 +1520,8 @@ class MagneticParticles {
 
     // Trickle budget: fractional particles accumulate across frames, capped
     // so a stalled tab can't dump the whole pool in one frame when it resumes.
-    const rate = this.count * (T.trickleBase + volume * T.trickleVolume);
+    const sim = this.look.sim;
+    const rate = this.count * (T.trickleBase + volume * T.trickleVolume) * sim.trickle;
     this.emitBudget = Math.min(this.emitBudget + rate * dt, this.count * T.trickleCap);
 
     // Burst budget: every bass onset, however soft (the burst size and the
@@ -1453,16 +1534,16 @@ class MagneticParticles {
     // How many may be in flight follows loudness: quiet means a sparse
     // scene, loud means the whole pool. Nothing is killed early; emission
     // just waits for natural recycling to bring the count under the cap.
-    const activeCap = this.count * (T.poolQuiet + (1 - T.poolQuiet) * volume);
+    const poolQuiet = sim.poolQuiet ?? T.poolQuiet;
+    const activeCap = this.count * (poolQuiet + (1 - poolQuiet) * volume);
 
-    const speed = T.speedBase + volume * T.speedVolume;
+    const speed = (T.speedBase + volume * T.speedVolume) * sim.speed;
     const steerBase = Math.min(1, dt * T.steer);
     const shimmerT = this.t * 6;
 
     // Charge forces, only when the look asks for them. Strength follows
     // loudness ("audio data can then influence the particles' charge and
     // strength of the forces applied").
-    const sim = this.look.sim;
     const useCharge = sim.charge !== 'none';
     const loudGain = 0.5 + 0.5 * volume;
     const coulomb = useCharge ? sim.coulomb * loudGain : 0;
@@ -1478,6 +1559,11 @@ class MagneticParticles {
 
       if (!this.active[i]) {
         if (this.activeCount >= activeCap) {
+          this.pointSizes[i] = 0;
+          continue;
+        }
+        // A strand still draining keeps its slot until it has faded.
+        if (this._drain && this.trailLen[i] > 1 && this.t - this.trailBirth[this.trailHead[i] * this.maxCount + i] < this.trailSeconds) {
           this.pointSizes[i] = 0;
           continue;
         }
@@ -1696,6 +1782,7 @@ class MagneticParticles {
         this.trailPositions[v3] = px; this.trailPositions[v3 + 1] = py; this.trailPositions[v3 + 2] = pz;
         this.trailColors[v3] = cr * bright; this.trailColors[v3 + 1] = cg * bright; this.trailColors[v3 + 2] = cb * bright;
         this.trailBirth[v] = this.t;
+        this.trailHead[i] = this.trailSlot;
         if (this.trailLen[i] < TRAIL_POINTS) this.trailLen[i]++;
       }
     }
@@ -1714,9 +1801,12 @@ class MagneticParticles {
     this._buildTrailIndex();
   }
 
-  // Segments for every active particle's valid trail points, newest first,
-  // stopping at the look's trail duration. Uploads only this frame's slot
-  // block of points and the used part of the index.
+  // Segments for every particle's valid trail points, newest first, stopping
+  // at the look's trail duration. The walk starts at the particle's own
+  // newest point: the current slot while it flies, its last slot once it has
+  // landed under a draining look (the strand then shortens from the root as
+  // its points age out). Uploads only this frame's slot block of points and
+  // the used part of the index.
   _buildTrailIndex() {
     const idx = this.trailIndex;
     let k = 0;
@@ -1725,9 +1815,9 @@ class MagneticParticles {
       for (let i = 0; i < this.count; i++) {
         const len = this.trailLen[i];
         if (len < 2) continue;
-        let slot = this.trailSlot;
+        let slot = this.trailHead[i];
         for (let j = 1; j < len; j++) {
-          const prev = (slot - 1 + P) % P;
+          const prev = slot === 0 ? P - 1 : slot - 1;
           const vPrev = prev * n + i;
           if (this.t - this.trailBirth[vPrev] > this.trailSeconds) break;
           idx[k++] = slot * n + i;
@@ -1752,6 +1842,7 @@ class Nebula {
   constructor(scene) {
     this.enabled = false;
     this.forced = null;   // a look can force the nebula on or off; null follows the B key
+    this.gain = 1;        // a look's nebulaGain: how dense the fog is when it's on
     this.sprites = [];
 
     const spriteCount = 12;
@@ -1805,7 +1896,7 @@ class Nebula {
     const targetOpacity = on ? 1.0 : 0;
 
     for (const s of this.sprites) {
-      const target = targetOpacity * (s.baseOpacity + volume * 0.25);
+      const target = Math.min(1, targetOpacity * (s.baseOpacity + volume * 0.25) * this.gain);
       s.mat.opacity = THREE.MathUtils.lerp(s.mat.opacity, target, 0.05);
       s.sprite.rotation.z += 0.0003;
     }
@@ -1815,6 +1906,7 @@ class Nebula {
     const col = new THREE.Color(palette.rayOuter);
     for (const s of this.sprites) s.mat.color = col;
     this.forced = look.scene.nebula === 'auto' ? null : look.scene.nebula === 'on';
+    this.gain = look.scene.nebulaGain;
   }
 }
 
@@ -2331,6 +2423,7 @@ class Visualizer {
     this.scene.background.set(bg);
     this.scene.fog.color.set(bg);
     this.scene.fog.density = look.scene.fog ? 0.006 : 0;
+    this.starfield.visible = look.scene.stars;
     this.bloomLevel = look.scene.bloom;
 
     this._updateInfo();
