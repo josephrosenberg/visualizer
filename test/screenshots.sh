@@ -14,7 +14,7 @@ python3 -m http.server $PORT >/dev/null 2>&1 & SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT
 sleep 1
 LOOKS="$*"
-[ -n "$LOOKS" ] || LOOKS="Classic Wireframe Rays+Only Points Long+Trails Wire+Rays Ghost Dense Comets Anemone"
+[ -n "$LOOKS" ] || LOOKS="Classic Wireframe Rays+Only Points Long+Trails Wire+Rays Ghost Dense Comets Anemone Starburst"
 : > "$OUT/console.log"
 for look in $LOOKS; do
   name=$(echo "$look" | tr '+' '_')

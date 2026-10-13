@@ -34,7 +34,7 @@ const THREE = {
   ShaderMaterial: class { constructor(o){Object.assign(this,o);} dispose(){} },
   LineBasicMaterial: class { constructor(o){Object.assign(this,o);} },
   Points: class { constructor(g,m){this.geometry=g;this.material=m;this.visible=true;} },
-  LineSegments: class { constructor(g,m){this.geometry=g;this.material=m;this.visible=true;} },
+  LineSegments: class { constructor(g,m){this.geometry=g;this.material=m;this.visible=true;this.frustumCulled=true;this.position=new THREE.Vector3();this.scale=new THREE.Vector3(1,1,1);this.rotation={x:0,y:0,z:0};} },
   Mesh: class { constructor(g,m){this.geometry=g;this.material=m;this.visible=true;this.castShadow=false;this.scale=new THREE.Vector3(1,1,1);this.position=new THREE.Vector3();this.rotation={x:0,y:0,z:0};this.quaternion=new THREE.Quaternion();} },
 };
 `;
@@ -44,6 +44,6 @@ export async function load() {
     .replace(/^import .*$/mg, '')
     .replace(/const viz = new Visualizer\(\);\s*viz\.start\(\);/, '');
   fs.mkdirSync(outDir, { recursive: true });
-  fs.writeFileSync(outPath, STUB + body + '\nexport { Core, MagneticParticles, PARTICLE_TUNING, AudioAnalyzer, DemoAnalyzer, AUDIO_TUNING, Visualizer, LOOKS, MODES, makeLook, PALETTES, paletteFromPixels, PHYSICS_G, TRAIL_POINTS, THREE };\n');
+  fs.writeFileSync(outPath, STUB + body + '\nexport { Core, MagneticParticles, PARTICLE_TUNING, AudioAnalyzer, DemoAnalyzer, AUDIO_TUNING, Visualizer, LOOKS, MODES, makeLook, PALETTES, paletteFromPixels, PHYSICS_G, TRAIL_POINTS, RAY_COUNT, LINK_MAX_PAIRS, THREE };\n');
   return import(pathToFileURL(outPath).href);
 }

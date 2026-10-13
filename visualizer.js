@@ -29,16 +29,21 @@ const PALETTES = [
 //                emission: 'spots' | 'even', energy, speed, trickle, poolQuiet }
 //                // energy, speed, trickle multiply PARTICLE_TUNING (1.0 = as tuned);
 //                // poolQuiet null = PARTICLE_TUNING.poolQuiet
-//   scene:     { nebula: 'auto' | 'on' | 'off', nebulaGain, bloom, fog, background: 'dark' | 'light', stars }
-//   extras:    []   // 'links', 'labels', 'streamlines', 'rays' (later looks)
+//   scene:     { nebula: 'auto' | 'on' | 'off', nebulaGain, bloom, fog, background: 'dark' | 'light', stars, haze }
+//                // haze 0..1 lifts the background toward the palette's outer colour (0 = as the palette says)
+//   extras:    []   // passes a look owns: 'links', 'rays' (Starburst, dials below); 'labels', 'streamlines' (later looks)
+//   links:     { radius, perParticle, maxPairs, opacity }   // the web between neighbouring stars, read only when extras has 'links'
+//   rays:      { count, length, spin, opacity }             // the ray fan per body, read only when extras has 'rays'
 const LOOK_DEFAULTS = {
   planet:    { skin: 'nebula', visible: true, wireframe: false, landing: 'ripple', spotLife: 3.0 },
   particles: { sprite: 'disc', size: 1.0, hueScatter: 0, countMul: 1.0 },
   trails:    { style: 'line', seconds: 0.5, opacity: 0.6, drain: false },
   sim:       { charge: 'none', coulomb: 0, separation: 0, chargeGain: 1.0,
                emission: 'spots', energy: 1.0, speed: 1.0, trickle: 1.0, poolQuiet: null },
-  scene:     { nebula: 'auto', nebulaGain: 1.0, bloom: 1.0, fog: true, background: 'dark', stars: true },
+  scene:     { nebula: 'auto', nebulaGain: 1.0, bloom: 1.0, fog: true, background: 'dark', stars: true, haze: 0 },
   extras:    [],
+  links:     { radius: 1.5, perParticle: 3, maxPairs: 7500, opacity: 0.35 },   // no-op: nothing reads it unless extras has 'links'
+  rays:      { count: 192, length: 6.0, spin: 0.06, opacity: 0.5 },            // no-op: nothing reads it unless extras has 'rays'
 };
 
 function makeLook(name, overrides = {}) {
@@ -85,12 +90,33 @@ const LOOKS = [
     sim:       { charge: 'random', coulomb: 0, separation: 1.0, emission: 'even', energy: 0.6, speed: 0.5, trickle: 2.5, poolQuiet: 0.5 },
     scene:     { nebula: 'on', nebulaGain: 1.6, bloom: 1.1, stars: false },
   }),
+  // Hodgin's starburst: every particle a star (a white-hot point in a soft
+  // halo, a faint lens cross on the bright ones), long straight rays fanning
+  // out of every body that breathe with the bass and turn slowly, a web of
+  // fine lines between stars that are near each other, planets as dark
+  // silhouettes carrying the lit dots of what has landed (the glass skin's
+  // spots on a near-black body), and a violet haze. Bursts leave the whole
+  // surface and launches are capped, so most stars hover in a shell around
+  // their body and some stream on to the sinks. No trails: the rays and the
+  // web are the line work. Links and rays are passes the look owns, named
+  // in extras and dialled in their own sections. Amethyst is the palette of
+  // the reference frame.
+  makeLook('Starburst', {
+    planet:    { skin: 'silhouette', landing: 'spot', spotLife: 3.0 },
+    particles: { sprite: 'star', size: 1.8, hueScatter: 0.15 },
+    trails:    { style: 'none' },
+    sim:       { emission: 'even', energy: 0.7, speed: 0.7, trickle: 2.0, poolQuiet: 0.5 },
+    scene:     { nebula: 'on', nebulaGain: 1.6, bloom: 1.3, stars: false, haze: 0.08 },
+    extras:    ['links', 'rays'],
+    links:     { radius: 2.0, perParticle: 3, maxPairs: 7500, opacity: 0.35 },
+    rays:      { count: 192, length: 6.0, spin: 0.06, opacity: 0.5 },
+  }),
 ];
 const MODES = LOOKS;
 
 // Planet skins and particle sprites by name; the shaders branch on the index.
-const PLANET_SKINS = { nebula: 0, glass: 1, rings: 2 };
-const SPRITES = { disc: 0, comet: 1 };
+const PLANET_SKINS = { nebula: 0, glass: 1, rings: 2, silhouette: 3 };
+const SPRITES = { disc: 0, comet: 1, star: 2 };
 
 // ─── Palette from an image ───────────────────────────────────────────────────
 
@@ -485,8 +511,8 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform vec3 uColorCore;
   uniform vec3 uColorInner;
   uniform vec3 uColorOuter;
-  uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass, 2 rings
-  uniform float uSpotLife;    // seconds a landing spot (kind 2) lingers on the glass skin
+  uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass, 2 rings, 3 silhouette
+  uniform float uSpotLife;    // seconds a landing spot (kind 2) lingers on the glass and silhouette skins
   uniform float uRadius;      // body radius, so a spot keeps its world size on a small body
   uniform vec4 uEvents[MAX_EVENTS];      // xyz: object-space direction, w: start time
   uniform float uEventKinds[MAX_EVENTS]; // 0 flare spot, 1 ripple, 2 landing spot
@@ -598,10 +624,53 @@ const PLANET_FRAGMENT = /* glsl */ `
     return color;
   }
 
+  // Skin 3, silhouette (Starburst): a near-black disc against the rays and
+  // the haze, with the faintest drifting mottle and a hairline limb so it
+  // reads as a body and not a hole, lit only by what has landed on it. The
+  // glass skin's spot machinery is reused as is (kind-2 events in the star's
+  // colour, uSpotLife, uRadius, the ring paced by SPOT_MIN_GAP, landing
+  // 'spot' in the look); the loop here has its own constants (a pinpoint in
+  // a small saturated halo, little bleed) and the glass skin is left
+  // untouched so Comets stays pixel-identical. Kinds 0 and 1 are not drawn.
+  vec3 silhouetteSkin(float NdotV) {
+    vec3 p = vWorldPos * 0.9;
+    float t = uTime * 0.05;
+    float mottle = vnoise(p + vec3(t, 0.0, -t)) * 0.7 + vnoise(p * 2.3 - vec3(0.0, t, 0.0)) * 0.3;
+    float limb  = pow(1.0 - NdotV, 8.0);
+    float pulse = 1.0 + uBass * 0.2 + uHit * 0.4;
+    vec3 color = uColorOuter * (0.012 + 0.02 * mottle);                  // near-black with a hint of the palette
+    color += mix(uColorInner, vec3(1.0), 0.5) * limb * 0.08 * pulse;     // hairline edge
+
+    vec3 on = normalize(vObjNormal);
+    float lifeSpan = max(uSpotLife, 0.01);
+    for (int i = 0; i < MAX_EVENTS; i++) {
+      vec4 e = uEvents[i];
+      float age = uTime - e.w;
+      if (age < 0.0 || age > lifeSpan) continue;
+      if (uEventKinds[i] < 1.5) continue;                  // landings only
+      float c = dot(on, e.xyz);
+      if (c < 0.85) continue;                              // more than ~0.55 rad away
+      float life  = age / lifeSpan;
+      float d     = length(on - e.xyz) * uRadius;          // chord length, world units
+      float hot   = exp(-d * d * 1200.0);                  // pinpoint, ~0.03 units
+      float halo  = exp(-d * d * 110.0);                   // small coloured dot, ~0.1 units
+      float bleed = exp(-d * d * 12.0);                    // a little light into the body, ~0.3 units
+      float fade  = (1.0 - life) * (1.0 - life) + exp(-age * 5.0);   // linger, plus an arrival flash
+      float win   = smoothstep(0.85, 0.95, c);             // dies before the cutoff, no seam
+      color += (uEventColors[i] * (halo * 1.1 + bleed * 0.08) + vec3(1.0) * hot * 0.9) * fade * win;
+    }
+    return color;
+  }
+
   void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(vViewDir);
     float NdotV = max(dot(N, V), 0.0);
+    if (uSkin > 2.5) {
+      vec3 Nw = normalize(vWorldNormal);
+      gl_FragColor = vec4(silhouetteSkin(max(dot(Nw, V), 0.0)), 1.0);
+      return;
+    }
     if (uSkin > 1.5) {
       vec3 Nw = normalize(vWorldNormal);
       gl_FragColor = vec4(ringSkin(max(dot(Nw, V), 0.0)), 1.0);
@@ -677,6 +746,88 @@ const PLANET_FRAGMENT = /* glsl */ `
   }
 `;
 
+// ─── Ray fan (Starburst extras: 'rays') ──────────────────────────────────────
+
+// Straight radial streaks from a body: one shared unit fan of RAY_COUNT
+// directions, each ray two vertices (root on the surface, tip at aT = 1)
+// with its own length share and seed, built once from a fixed-seed hash so
+// it never touches Math.random (the planet and particle RNG sequences stay
+// as they were). Every core owns a LineSegments on this geometry, placed at
+// the body, scaled by radius x lifecycle (so it grows in and collapses with
+// the body) and spun slowly about its own tilted axis. The vertex shader
+// stretches each ray to the look's length, breathing with the bass and
+// jumping on a hit; the fragment fades it to nothing by the tip. Nothing is
+// uploaded per frame: a transform and a few uniforms per body. Hidden under
+// every look whose extras do not name 'rays'.
+const RAY_COUNT = 192;
+let RAY_GEOMETRY = null;
+function rayGeometry() {
+  if (RAY_GEOMETRY) return RAY_GEOMETRY;
+  let s = 0x9e3779b9;   // mulberry32 with a fixed seed: the fan is the same every session
+  const rnd = () => { s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const n = RAY_COUNT;
+  const pos = new Float32Array(n * 6), t = new Float32Array(n * 2), len = new Float32Array(n * 2), seed = new Float32Array(n * 2);
+  for (let k = 0; k < n; k++) {
+    const theta = rnd() * Math.PI * 2, z = 2 * rnd() - 1, sx = Math.sqrt(1 - z * z);   // uniform on the sphere
+    const l = 0.3 + 0.7 * Math.pow(rnd(), 1.5);   // most rays short, a few long
+    const sd = rnd();
+    for (let e = 0; e < 2; e++) {
+      const v = k * 2 + e, v3 = v * 3;
+      pos[v3] = sx * Math.cos(theta); pos[v3 + 1] = sx * Math.sin(theta); pos[v3 + 2] = z;
+      t[v] = e; len[v] = l; seed[v] = sd;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));   // the ray's unit direction; the shader places it
+  g.setAttribute('aT', new THREE.BufferAttribute(t, 1));
+  g.setAttribute('aLen', new THREE.BufferAttribute(len, 1));
+  g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+  RAY_GEOMETRY = g;
+  return g;
+}
+
+const RAY_VERTEX = /* glsl */ `
+  attribute float aT;      // 0 root, 1 tip
+  attribute float aLen;    // this ray's share of uLength
+  attribute float aSeed;
+  uniform float uTime;
+  uniform float uBass;
+  uniform float uHit;
+  uniform float uLength;   // world units at full length for a body of radius 1
+  uniform float uRadius;   // body radius: the object is scaled by it, so lengths divide it out
+  varying float vT;
+  varying float vSeed;
+  void main() {
+    // position is the unit direction; the object carries the body's
+    // position, scale (radius x lifecycle) and spin. Rays breathe with the
+    // bass, jump on a hit and shimmer a little on their own seed. Length
+    // grows with the body but slower than its radius, so a satellite keeps
+    // a fan and a sun's does not swallow the frame.
+    float breath = 1.0 + uBass * 0.35 + uHit * 0.5;
+    float wobble = 0.9 + 0.1 * sin(uTime * (1.0 + aSeed * 2.0) + aSeed * 40.0);
+    float len = uLength * aLen * breath * wobble * (0.5 + 0.5 * uRadius) / uRadius;
+    vec3 p = position * (1.03 + aT * len);
+    vT = aT;
+    vSeed = aSeed;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+  }
+`;
+
+const RAY_FRAGMENT = /* glsl */ `
+  uniform vec3 uColorInner;
+  uniform vec3 uColorOuter;
+  uniform float uOpacity;
+  uniform float uVolume;
+  varying float vT;
+  varying float vSeed;
+  void main() {
+    float fall = (1.0 - vT) * (1.0 - vT);                      // bright at the root, gone by the tip
+    float a = fall * uOpacity * (0.5 + 0.5 * uVolume) * (0.6 + 0.4 * vSeed);
+    vec3 col = mix(mix(uColorInner, vec3(1.0), 0.35), uColorOuter, vT);
+    gl_FragColor = vec4(col * a, 1.0);                         // additive, like the trails
+  }
+`;
+
 class Core {
   // params: { role, mass, charge, radius, position: Vector3, velocity: Vector3 }
   constructor(scene, index, params) {
@@ -745,6 +896,34 @@ class Core {
     this.mesh.scale.setScalar(0.001); // start invisible
     this.mesh.position.copy(this.position);
     scene.add(this.mesh);
+
+    // Ray fan (extras 'rays'): hidden until a look asks for it. The tilt of
+    // its spin axis comes from the body's index, not from the RNG.
+    this.rayUniforms = {
+      uTime:       { value: 0 },
+      uBass:       { value: 0 },
+      uHit:        { value: 0 },
+      uVolume:     { value: 0 },
+      uColorInner: { value: new THREE.Color(0x6699ff) },
+      uColorOuter: { value: new THREE.Color(0x2244aa) },
+      uLength:     { value: LOOK_DEFAULTS.rays.length },
+      uOpacity:    { value: LOOK_DEFAULTS.rays.opacity },
+      uRadius:     { value: this.radius },
+    };
+    this.rayMaterial = new THREE.ShaderMaterial({
+      vertexShader: RAY_VERTEX,
+      fragmentShader: RAY_FRAGMENT,
+      uniforms: this.rayUniforms,
+      transparent: true,
+      depthWrite: false,          // depthTest stays on: a silhouette in front hides the rays behind it
+      blending: THREE.AdditiveBlending,
+    });
+    this.rays = new THREE.LineSegments(rayGeometry(), this.rayMaterial);
+    this.rays.visible = false;
+    this.rays.frustumCulled = false;                       // the unit fan's sphere is the body; the rays reach far past it
+    this.rays.rotation.x = (((index * 0.618034) % 1) - 0.5) * 0.8;   // each fan spins about its own tilted axis
+    this._raySpin = 0;
+    scene.add(this.rays);
   }
 
   // Gravitational mass used by the n-body sim. Fades linearly to zero across
@@ -821,6 +1000,7 @@ class Core {
         this.phase = 'dead';
         this.alive = false;
         this.mesh.visible = false;
+        this.rays.visible = false;
       }
     }
 
@@ -839,6 +1019,14 @@ class Core {
     this.uniforms.uMid.value = audio.getMid();
     this.uniforms.uTreble.value = audio.getTreble();
     this.uniforms.uHit.value = hit;
+
+    if (this.rays.visible) {
+      this.rays.position.copy(this.position);
+      this.rays.scale.setScalar(Math.max(0.001, this.scaleT) * this.radius);
+      this.rays.rotation.y = time * this._raySpin;        // sim time: stops under F with the shader time
+      const u = this.rayUniforms;
+      u.uTime.value = time; u.uBass.value = audio.getBass(); u.uHit.value = hit; u.uVolume.value = audio.getVolume();
+    }
   }
 
   // Start collapsing now, from the current scale, so a body that's still
@@ -854,6 +1042,8 @@ class Core {
     this.scene.remove(this.mesh);
     this.geometry.dispose();
     this.material.dispose();
+    this.scene.remove(this.rays);
+    this.rayMaterial.dispose();                            // the fan geometry is shared, it stays
   }
 
   applyLook(look, palette) {
@@ -871,6 +1061,17 @@ class Core {
     this.uniforms.uColorCore.value.set(palette.core);
     this.uniforms.uColorInner.value.set(palette.rayInner);
     this.uniforms.uColorOuter.value.set(palette.rayOuter);
+
+    // Extras this look owns: the ray fan. The fan geometry is shared, so its
+    // draw range (rays.count) is the current look's for every body.
+    const r = look.rays;
+    this.rays.visible = look.extras.includes('rays') && this.alive;
+    this._raySpin = (this.index % 2 ? -1 : 1) * r.spin;   // neighbours spin opposite ways
+    this.rays.geometry.setDrawRange(0, Math.min(RAY_COUNT, r.count) * 2);
+    this.rayUniforms.uLength.value = r.length;
+    this.rayUniforms.uOpacity.value = r.opacity;
+    this.rayUniforms.uColorInner.value.set(palette.rayInner);
+    this.rayUniforms.uColorOuter.value.set(palette.rayOuter);
   }
 }
 
@@ -886,6 +1087,8 @@ class Core {
 // All speeds are scene units per second, rates are particles per second.
 // These are the knobs to turn while watching Demo Mode.
 const TRAIL_POINTS = 200;  // ring slots per particle; points are written at most 60/s, so 3.3 s at any refresh rate
+const LINK_MAX_PAIRS = 7500;   // fixed link buffer (Starburst): 5000 stars x 3 links / 2 under the A key, so the cap never binds; the look runs at the chosen count
+const LINK_MAX_DEGREE = 8;     // partners a star can list; links.perParticle is clamped to it
 
 const PARTICLE_TUNING = {
   // Emission
@@ -1039,6 +1242,7 @@ class MagneticParticles {
         varying vec3 vColor;
         varying vec2 vDir;    // comet: screen-space direction of travel in gl_PointCoord space (y down)
         varying float vTail;  // comet: 0..1 how much tail to draw; short when moving along the view axis
+        varying float vSpike; // star: 0..1 how much lens cross to draw; only the bigger, brighter points get one
         void main() {
           vColor = color;
           vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
@@ -1047,7 +1251,15 @@ class MagneticParticles {
           gl_Position = clip;
           vDir = vec2(0.0, 1.0);
           vTail = 0.0;
-          if (uSprite > 0.5) {
+          vSpike = 0.0;
+          if (uSprite > 1.5) {
+            // Star: a lens cross on the bigger, brighter points only (near,
+            // a loud bin, a large sizeMul), as the flares in the reference
+            // sit on the brightest stars. Sized in device pixels.
+            float px = size * (250.0 / -mvPos.z);
+            float lum = max(color.r, max(color.g, color.b));
+            vSpike = smoothstep(10.0, 22.0, px) * smoothstep(0.4, 0.9, lum);
+          } else if (uSprite > 0.5) {
             // Where the particle will be in 1/20 s, projected, gives the tail
             // direction on screen. x is scaled by the aspect (P[1][1] / P[0][0])
             // so the direction is right inside the square point sprite.
@@ -1062,10 +1274,11 @@ class MagneticParticles {
         }
       `,
       fragmentShader: `
-        uniform float uSprite;   // SPRITES index: 0 disc, 1 comet
+        uniform float uSprite;   // SPRITES index: 0 disc, 1 comet, 2 star
         varying vec3 vColor;
         varying vec2 vDir;
         varying float vTail;
+        varying float vSpike;
         void main() {
           if (uSprite < 0.5) {
             float d = length(gl_PointCoord - 0.5) * 2.0;
@@ -1076,6 +1289,26 @@ class MagneticParticles {
             float core = 1.0 - smoothstep(0.0, 0.35, d);
             float alpha = disc * 0.85 + core * 0.6;
             gl_FragColor = vec4(vColor * (1.0 + core * 0.6), alpha);
+            return;
+          }
+          if (uSprite > 1.5) {
+            // Star: a hot centre, a soft halo that fills the sprite (the
+            // halos of a cluster sum into its glow), and on the bigger
+            // points a faint four-point lens cross along the screen axes:
+            // each arm a thin gaussian across and a square fall-off along,
+            // so it is a short spike, not a line to the sprite edge.
+            vec2 p = (gl_PointCoord - 0.5) * 2.0;
+            float r2 = dot(p, p);
+            float hot  = exp(-r2 * 55.0);                                   // the point, ~0.13 of the sprite
+            float halo = exp(-r2 * 5.0);                                    // soft glow, gone by the edge
+            vec2 a = abs(p);
+            float spike = exp(-a.x * a.x * 160.0) * (1.0 - a.y) * (1.0 - a.y)   // vertical arm
+                        + exp(-a.y * a.y * 160.0) * (1.0 - a.x) * (1.0 - a.x);  // horizontal arm
+            spike *= vSpike;
+            float alpha = hot + halo * 0.4 + spike * 0.5;
+            if (alpha < 0.004) discard;                                     // also trims the square: the halo is 0.0027 at the corner
+            vec3 rgb = vColor * (halo * 0.55 + spike * 0.6 + hot * 0.5) + vec3(hot) * 1.4 + vec3(spike) * 0.25;
+            gl_FragColor = vec4(rgb, min(alpha, 1.0));
             return;
           }
           // Comet: a white-hot head with a coloured glow and a tail that
@@ -1172,6 +1405,43 @@ class MagneticParticles {
     this.trailLines = new THREE.LineSegments(this.trailGeo, this.trailMat);
     scene.add(this.trailLines);
 
+    // --- Links (Starburst) ---
+    // A fixed buffer of LINK_MAX_PAIRS segments with a draw range, filled
+    // from the spatial grid by _buildLinks when the look's extras include
+    // 'links'. Own vertices rather than an index over the point buffer so
+    // each pair can carry its own distance fade. Each star keeps the
+    // partners its own walk found this frame, so a pair is written once.
+    this._links = null;                        // the look's links section while the pass is on
+    this.linkPairs = 0;
+    this.linkDegree = new Uint8Array(n);
+    this.linkOf = new Int32Array(n * LINK_MAX_DEGREE);
+    this.linkPositions = new Float32Array(LINK_MAX_PAIRS * 6);
+    this.linkColors = new Float32Array(LINK_MAX_PAIRS * 6);
+    this.linkGeo = new THREE.BufferGeometry();
+    this.linkPosAttr = new THREE.BufferAttribute(this.linkPositions, 3);
+    this.linkColAttr = new THREE.BufferAttribute(this.linkColors, 3);
+    this.linkGeo.setAttribute('position', this.linkPosAttr);
+    this.linkGeo.setAttribute('color', this.linkColAttr);
+    this.linkGeo.setDrawRange(0, 0);
+    this.linkMat = new THREE.ShaderMaterial({
+      vertexShader: `
+        attribute vec3 color;
+        varying vec3 vColor;
+        void main() { vColor = color; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+      `,
+      fragmentShader: `
+        varying vec3 vColor;
+        void main() { gl_FragColor = vec4(vColor, 1.0); }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.linkLines = new THREE.LineSegments(this.linkGeo, this.linkMat);
+    this.linkLines.visible = false;
+    this.linkLines.frustumCulled = false;   // the bounding sphere would be computed once, from zeros
+    scene.add(this.linkLines);
+
     this.innerColor = new THREE.Color(0x6699ff);
     this.outerColor = new THREE.Color(0x2244aa);
     // Pooled color objects to avoid GC pressure in hot loops
@@ -1212,6 +1482,12 @@ class MagneticParticles {
     this._spotEvents = look.planet.landing === 'spot';
     this.points.visible = true;
 
+    // Extras this look owns. Links: a web between neighbours, rebuilt from
+    // the grid each frame into the fixed buffer; off, it draws nothing.
+    this._links = look.extras.includes('links') ? look.links : null;
+    this.linkLines.visible = this._links !== null;
+    if (!this._links) { this.linkGeo.setDrawRange(0, 0); this.linkPairs = 0; }
+
     this.innerColor.set(palette.rayInner);
     this.outerColor.set(palette.rayOuter);
     // Hue scatter is fixed per particle per look, so shift the palette once
@@ -1243,13 +1519,15 @@ class MagneticParticles {
     return 0;
   }
 
-  // Spatial hash of the active particles for the separation force.
+  // Spatial hash of the active particles, cell size cell: the separation
+  // force walks it (built before the move at sepRadius) and so do the
+  // Starburst links (rebuilt after the move at the link radius).
   _cellHash(x, y, z) {
     return (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) & 4095;
   }
 
-  _buildGrid() {
-    const inv = 1 / PARTICLE_TUNING.sepRadius;
+  _buildGrid(cell = PARTICLE_TUNING.sepRadius) {
+    const inv = 1 / cell;
     this._gridHeads.fill(-1);
     for (let i = 0; i < this.count; i++) {
       if (!this.active[i]) continue;
@@ -1804,6 +2082,11 @@ class MagneticParticles {
     if (this._cometSprite) this.pointGeo.attributes.velocity.needsUpdate = true;
     this.pointGeo.setDrawRange(0, this.count);
 
+    // Links read this frame's final positions, so the grid is rebuilt here
+    // at the link radius (the separation grid, when a look has both, was
+    // built before the move at sepRadius and is spent).
+    if (this._links) { this._buildGrid(this._links.radius); this._buildLinks(); }
+
     this._buildTrailIndex();
   }
 
@@ -1841,6 +2124,62 @@ class MagneticParticles {
     }
     this.trailGeo.setDrawRange(0, k);
     this.trailMat.uniforms.uNow.value = this.t;
+  }
+
+  // Starburst's web. For each star in flight, partners within the link
+  // radius from its own grid cell and the 26 around it (nearest cells
+  // first, like the separation walk), first found, until it carries
+  // perParticle links counting both directions, or the frame's maxPairs is
+  // spent. Grid chains run in decreasing index order, so the walk stops at
+  // the first j <= i: every pair is visited once, from its lower index. Two
+  // of the 27 cells can hash to one bucket, so a chain can be walked twice;
+  // the star's own partner list catches the repeat. A pair is two vertices
+  // in the fixed buffer, coloured like its ends and dimmed by distance
+  // squared, so a link grows in as the pair closes instead of popping at
+  // the radius. Uploads only the pairs written. Dormant particles never
+  // enter the grid, so links join stars in flight only.
+  _buildLinks() {
+    const L = this._links, n = this.count, r = L.radius, r2 = r * r, inv = 1 / r;
+    const pos = this.positions, col = this.pointColors, lp = this.linkPositions, lc = this.linkColors;
+    const deg = this.linkDegree, mine = this.linkOf, S = LINK_MAX_DEGREE;
+    const maxPairs = Math.min(L.maxPairs, LINK_MAX_PAIRS), per = Math.min(L.perParticle, S), op = L.opacity;
+    deg.fill(0, 0, n);
+    let k = 0;
+    for (let i = 0; i < n && k < maxPairs; i++) {
+      if (!this.active[i] || deg[i] >= per) continue;
+      const i3 = i * 3, px = pos[i3], py = pos[i3 + 1], pz = pos[i3 + 2], iS = i * S;
+      const cx = Math.floor(px * inv), cy = Math.floor(py * inv), cz = Math.floor(pz * inv);
+      let found = 0;
+      for (let c = 0; c < 81 && deg[i] < per && k < maxPairs; c += 3) {
+        let j = this._gridHeads[this._cellHash(cx + SEP_CELL_ORDER[c], cy + SEP_CELL_ORDER[c + 1], cz + SEP_CELL_ORDER[c + 2])];
+        while (j > i && deg[i] < per && k < maxPairs) {
+          if (deg[j] < per) {
+            const j3 = j * 3;
+            const dx = px - pos[j3], dy = py - pos[j3 + 1], dz = pz - pos[j3 + 2];
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < r2) {
+              let dup = false;
+              for (let t = 0; t < found; t++) if (mine[iS + t] === j) { dup = true; break; }
+              if (!dup) {
+                mine[iS + found++] = j;
+                const fade = (1 - d2 / r2) * op, k6 = k * 6;
+                lp[k6] = px; lp[k6 + 1] = py; lp[k6 + 2] = pz;
+                lp[k6 + 3] = pos[j3]; lp[k6 + 4] = pos[j3 + 1]; lp[k6 + 5] = pos[j3 + 2];
+                lc[k6] = col[i3] * fade; lc[k6 + 1] = col[i3 + 1] * fade; lc[k6 + 2] = col[i3 + 2] * fade;
+                lc[k6 + 3] = col[j3] * fade; lc[k6 + 4] = col[j3 + 1] * fade; lc[k6 + 5] = col[j3 + 2] * fade;
+                k++; deg[i]++; deg[j]++;
+              }
+            }
+          }
+          j = this._gridNext[j];
+        }
+      }
+    }
+    this.linkPairs = k;
+    const floats = Math.max(3, k * 6);
+    this.linkPosAttr.clearUpdateRanges(); this.linkPosAttr.addUpdateRange(0, floats); this.linkPosAttr.needsUpdate = true;
+    this.linkColAttr.clearUpdateRanges(); this.linkColAttr.addUpdateRange(0, floats); this.linkColAttr.needsUpdate = true;
+    this.linkGeo.setDrawRange(0, k * 2);
   }
 }
 
@@ -1991,6 +2330,7 @@ class Visualizer {
     // System state
     this.systemConfig = null;
     this.targetBodies = 0;   // 0 = random systems; 1-5 = a count the system keeps
+    this._tmpBg = new THREE.Color();
 
     this._initRenderer();
     this._initScene();
@@ -2448,7 +2788,10 @@ class Visualizer {
 
     const bg = (look.scene.background === 'light' && palette.bgLight !== undefined) ? palette.bgLight : palette.bg;
     this.scene.background.set(bg);
-    this.scene.fog.color.set(bg);
+    // Haze: lift the background toward the palette's outer colour so the
+    // frame is bathed in it rather than black (no-op at 0).
+    if (look.scene.haze > 0) this.scene.background.lerp(this._tmpBg.set(palette.rayOuter), look.scene.haze);
+    this.scene.fog.color.copy(this.scene.background);
     this.scene.fog.density = look.scene.fog ? 0.006 : 0;
     this.starfield.visible = look.scene.stars;
     this.bloomLevel = look.scene.bloom;
