@@ -134,16 +134,20 @@ Then in the browser:
 
 1. **Particle feel**: tune `PARTICLE_TUNING` by eye (burst size, spots, launch speeds, `srcGravity` for the bounce/escape split, shimmer, pull)
    - Ring sizes and lives are constants in the planet fragment shader (angular, so small bodies get small ripples)
-   - Trails are JS arrays with `splice`, GC churn at 5000 particles
    - Draining is per look (`trails.drain`); the eight originals and Comets still pop their short trails on landing
    - Particles ignore `role` beyond the sign of the charge
+   - Under a 5-planet lock the outer satellites perturb each other and one can drift onto a wide orbit, which makes the camera zoom out to keep framing it
 
 2. **Audio feel**: tune `AUDIO_TUNING` on real tracks across genres (onset ratios, leveler memory, hit decay)
    - Mid and treble hits are computed but nothing uses them yet (snare flash, hat sparkle)
    - Palette or hue could follow the spectral balance
 
-3. **New looks** (Magnetosphere 1.0 vocabulary, in this order): Attractor is in (the "inner logic" view)
-   - Ribbons and Paper are in; tune by eye on a real display with a real track: `ribbons.width` / `speedRef` / `twist` / `roll` / `tint`, the key light direction (`uLight`), `shards.*`, the paper skin's outline band, the flat sprite's ring, and `lightBackground`'s lightness (0.47) and saturation cap (0.30), solved against the ACES tone mapping for the reference ground
-   - Starburst is in; tune by eye on a real display: `links.radius` / `links.opacity` (web density), `rays.length` / `rays.opacity`, `scene.haze` and `nebulaGain` (the violet bath)
-   - Attractor is in; tune by eye on a real display: the hot skin's crust, rim and equator gains, `orbits.dotSize` / `opacity`, `streamlines.opacity` / `perBody` / `every` (the one dial for a slow machine), `labels.scale` and the two atlas font sizes, `scene.nebulaGain` / `bloom`; the reference's flat plane of particles receding to the horizon is not built
-   - Each look adds its skin / sprite / extras under the schema above; shaders branch on `uSkin` / `uSprite`
+3. **Look tuning**: all five Magnetosphere 1.0 looks are in (Comets, Anemone, Starburst, Ribbons with Paper, Attractor). Each was built from a judged design, implemented, reviewed on several lenses with adversarial verification, and checked headlessly; none has been tuned on a real display with a real track yet. Dials by look:
+   - Comets: `size`, `hueScatter`, `spotLife`, the glass skin's spot gains
+   - Anemone: `separation`, `trails.opacity`, `particles.size`, `nebulaGain`, `energy`
+   - Starburst: `links.radius` / `links.opacity` (web density), `rays.length` / `rays.opacity`, `scene.haze` and `nebulaGain` (the violet bath)
+   - Ribbons and Paper: `ribbons.width` / `speedRef` / `twist` / `roll` / `tint`, the key light direction (`uLight`), `shards.*`, the paper skin's outline band, the flat sprite's ring, `lightBackground`'s lightness (0.47) and saturation cap (0.30)
+   - Attractor: the hot skin's crust, rim and equator gains, `orbits.dotSize` / `opacity`, `streamlines.opacity` / `perBody` / `every` (the one dial for a slow machine), `labels.scale` and the two atlas font sizes, `scene.nebulaGain` / `bloom`; the reference's flat plane of particles receding to the horizon is not built
+   - A new look adds its skin / sprite / extras under the schema above; shaders branch on `uSkin` / `uSprite`, and every sprite past star must be tested by equality (a test reads the shader source for that)
+
+4. **Magnetosphere 2.0 direction** (parked by choice; the 1.0 looks came first): a GPU particle layer of tens of thousands of lightweight particles in a curl-noise flow with per-planet attract, repel and spin forces, drawn as chromatic streaks; planets with a lens-warped chromatic rim and radiant bursts on beats; a spin axis per planet so escapees orbit. Hodgin's write-up: roberthodgin.com/project/magnetosphere-2-0
