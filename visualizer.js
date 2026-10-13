@@ -67,7 +67,7 @@ const LOOKS = [
   // are dark glass that light up where the comets land.
   makeLook('Comets', {
     planet:    { skin: 'glass', landing: 'spot', spotLife: 3.0 },
-    particles: { sprite: 'comet', size: 2.2, hueScatter: 0.2, countMul: 1.3 },
+    particles: { sprite: 'comet', size: 2.2, hueScatter: 0.2 },
     trails:    { style: 'comet', seconds: 1.0, opacity: 0.7 },
     scene:     { bloom: 1.25 },
   }),
@@ -80,7 +80,7 @@ const LOOKS = [
   // the frame. Aurora is the palette of the reference frame.
   makeLook('Anemone', {
     planet:    { skin: 'rings' },
-    particles: { sprite: 'disc', size: 0.6, hueScatter: 0.08, countMul: 4.0 },
+    particles: { sprite: 'disc', size: 0.6, hueScatter: 0.08 },
     trails:    { style: 'hair', seconds: 3.0, opacity: 0.3, drain: true },
     sim:       { charge: 'random', coulomb: 0, separation: 1.0, emission: 'even', energy: 0.6, speed: 0.5, trickle: 2.5, poolQuiet: 0.5 },
     scene:     { nebula: 'on', nebulaGain: 1.6, bloom: 1.1, stars: false },
@@ -885,7 +885,7 @@ class Core {
 //
 // All speeds are scene units per second, rates are particles per second.
 // These are the knobs to turn while watching Demo Mode.
-const TRAIL_POINTS = 400;  // ring slots per particle: 6.7 s of trail at 60 fps, 3.3 s at 120
+const TRAIL_POINTS = 200;  // ring slots per particle; points are written at most 60/s, so 3.3 s at any refresh rate
 
 const PARTICLE_TUNING = {
   // Emission
@@ -1113,6 +1113,8 @@ class MagneticParticles {
     // each particle's valid points and fade in the shader by age, so trail
     // length is seconds, not points, and frame rate doesn't change the look.
     this.trailSlot = 0;
+    this._lastTrailWrite = -1;
+    this._trailWrote = false;
     const tp = TRAIL_POINTS * n;
     this.trailPositions = new Float32Array(tp * 3);
     this.trailColors = new Float32Array(tp * 3);
@@ -1550,8 +1552,12 @@ class MagneticParticles {
     const separation = useCharge ? sim.separation * loudGain : 0;
     if (separation > 0) this._buildGrid();
 
-    // Trail ring: advance the shared slot once per frame.
-    if (this.trailStyle !== 'none') this.trailSlot = (this.trailSlot + 1) % TRAIL_POINTS;
+    // Trail ring: advance the shared slot at most 60 times a second, so a
+    // 120 Hz display gets the same trail resolution, memory and segment count
+    // as a 60 Hz one.
+    const writeTrail = this.trailStyle !== 'none' && this.t - this._lastTrailWrite >= 1 / 60 - 1e-4;
+    if (writeTrail) { this.trailSlot = (this.trailSlot + 1) % TRAIL_POINTS; this._lastTrailWrite = this.t; }
+    this._trailWrote = writeTrail;
     const slotBase = this.trailSlot * this.maxCount;
 
     for (let i = 0; i < this.count; i++) {
@@ -1776,7 +1782,7 @@ class MagneticParticles {
       this.pointSizes[i] = T.pointSize * this.spriteScale * (0.6 + freqAmp * 0.8) * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]) * (0.5 + 0.5 * bright);
 
       // Trail point for this frame
-      if (this.trailStyle !== 'none') {
+      if (writeTrail) {
         const v = slotBase + i;
         const v3 = v * 3;
         this.trailPositions[v3] = px; this.trailPositions[v3 + 1] = py; this.trailPositions[v3 + 2] = pz;
@@ -1825,10 +1831,12 @@ class MagneticParticles {
           slot = prev;
         }
       }
-      const slotBase = this.trailSlot * n;
-      this.trailPosAttr.clearUpdateRanges(); this.trailPosAttr.addUpdateRange(slotBase * 3, this.count * 3); this.trailPosAttr.needsUpdate = true;
-      this.trailColAttr.clearUpdateRanges(); this.trailColAttr.addUpdateRange(slotBase * 3, this.count * 3); this.trailColAttr.needsUpdate = true;
-      this.trailBirthAttr.clearUpdateRanges(); this.trailBirthAttr.addUpdateRange(slotBase, this.count); this.trailBirthAttr.needsUpdate = true;
+      if (this._trailWrote) {
+        const slotBase = this.trailSlot * n;
+        this.trailPosAttr.clearUpdateRanges(); this.trailPosAttr.addUpdateRange(slotBase * 3, this.count * 3); this.trailPosAttr.needsUpdate = true;
+        this.trailColAttr.clearUpdateRanges(); this.trailColAttr.addUpdateRange(slotBase * 3, this.count * 3); this.trailColAttr.needsUpdate = true;
+        this.trailBirthAttr.clearUpdateRanges(); this.trailBirthAttr.addUpdateRange(slotBase, this.count); this.trailBirthAttr.needsUpdate = true;
+      }
       this.trailIdxAttr.clearUpdateRanges(); this.trailIdxAttr.addUpdateRange(0, Math.max(1, k)); this.trailIdxAttr.needsUpdate = true;
     }
     this.trailGeo.setDrawRange(0, k);
@@ -2001,6 +2009,25 @@ class Visualizer {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.3;
     document.body.appendChild(this.renderer.domElement);
+
+    // A lost GPU context leaves a black canvas with no error; say so and
+    // reload, which is the only recovery that works reliably.
+    this.renderer.domElement.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this._showError('GPU context lost, reloading');
+      setTimeout(() => window.location.reload(), 1500);
+    });
+  }
+
+  // Put a failure on screen in the info corner, since nobody has the console
+  // open while a track plays.
+  _showError(msg) {
+    console.error(msg);
+    const el = document.getElementById('info-text');
+    if (!el) return;
+    el.style.color = '#f66';
+    el.textContent = msg;
+    this._errorShown = true;
   }
 
   _initScene() {
@@ -2451,10 +2478,11 @@ class Visualizer {
   }
 
   _updateInfo() {
+    if (this._errorShown) return;
     const mode = LOOKS[this.modeIndex];
     const palette = PALETTES[this.paletteIndex];
     const el = document.getElementById('info-text');
-    el.innerHTML = `${mode.name} / ${palette.name}<br>${this.particles.activeCount} / ${this.particleCount} particles${this.targetBodies ? ` / ${this.targetBodies} planets` : ''}${this.nebula.enabled ? ' / nebula' : ''}${this.frozen ? ' / frozen' : ''}`;
+    el.innerHTML = `${mode.name} / ${palette.name}<br>${this.particles.activeCount} / ${this.particles.count} particles${this.targetBodies ? ` / ${this.targetBodies} planets` : ''}${this.nebula.enabled ? ' / nebula' : ''}${this.frozen ? ' / frozen' : ''}`;
   }
 
   _bindEvents() {
@@ -2466,6 +2494,9 @@ class Visualizer {
     });
 
     this.helpEl = document.getElementById('help-overlay');
+
+    window.addEventListener('error', (e) => this._showError(`Error: ${e.message || e}`));
+    window.addEventListener('unhandledrejection', (e) => this._showError(`Error: ${e.reason && e.reason.message ? e.reason.message : e.reason}`));
 
     window.addEventListener('keydown', (e) => {
       const key = e.key;
