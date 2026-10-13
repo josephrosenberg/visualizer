@@ -16,18 +16,104 @@ const PALETTES = [
   { name: 'Monochrome',core: 0xbbbbbb, rayInner: 0xffffff, rayOuter: 0x666666, bg: 0x050505 },
 ];
 
-// ─── Visual Modes ────────────────────────────────────────────────────────────
+// ─── Looks (visual modes) ────────────────────────────────────────────────────
 
-const MODES = [
-  { name: 'Classic',       coreVisible: true,  wireframe: false, metalness: 0.8, roughness: 0.15, rayStyle: 'ribbon',  trailLen: 30, particleMul: 1.0 },
-  { name: 'Wireframe',     coreVisible: true,  wireframe: true,  metalness: 0.5, roughness: 0.3,  rayStyle: 'line',    trailLen: 40, particleMul: 1.0 },
-  { name: 'Rays Only',     coreVisible: false, wireframe: false, metalness: 0,   roughness: 0,    rayStyle: 'ribbon',  trailLen: 35, particleMul: 1.0 },
-  { name: 'Points',        coreVisible: true,  wireframe: false, metalness: 0.9, roughness: 0.1,  rayStyle: 'point',   trailLen: 0,  particleMul: 1.0 },
-  { name: 'Long Trails',   coreVisible: true,  wireframe: false, metalness: 0.7, roughness: 0.2,  rayStyle: 'ribbon',  trailLen: 60, particleMul: 1.0 },
-  { name: 'Wire Rays',     coreVisible: true,  wireframe: true,  metalness: 0.4, roughness: 0.4,  rayStyle: 'line',    trailLen: 25, particleMul: 1.0 },
-  { name: 'Ghost',         coreVisible: false, wireframe: false, metalness: 0,   roughness: 0,    rayStyle: 'line',    trailLen: 50, particleMul: 1.0 },
-  { name: 'Dense',         coreVisible: true,  wireframe: false, metalness: 0.6, roughness: 0.3,  rayStyle: 'ribbon',  trailLen: 50, particleMul: 2.5 },
+// A look is declarative: each subsystem reads its own section in applyLook.
+// Unknown skins, sprites or styles fall back to the defaults, so a new look
+// can be added one section at a time. Palettes are separate (P key).
+//
+//   planet:    { skin, visible, wireframe }
+//   particles: { sprite, size, hueScatter, countMul }
+//   trails:    { style: 'line' | 'none', seconds, opacity }
+//   sim:       { charge: 'none' | 'frequency' | 'random', coulomb, separation, chargeGain }
+//   scene:     { nebula: 'auto' | 'on' | 'off', bloom, fog, background: 'dark' | 'light' }
+//   extras:    []   // 'links', 'labels', 'streamlines', 'rays' (later looks)
+const LOOK_DEFAULTS = {
+  planet:    { skin: 'nebula', visible: true, wireframe: false },
+  particles: { sprite: 'disc', size: 1.0, hueScatter: 0, countMul: 1.0 },
+  trails:    { style: 'line', seconds: 0.5, opacity: 0.6 },
+  sim:       { charge: 'none', coulomb: 0, separation: 0, chargeGain: 1.0 },
+  scene:     { nebula: 'auto', bloom: 1.0, fog: true, background: 'dark' },
+  extras:    [],
+};
+
+function makeLook(name, overrides = {}) {
+  const look = { name };
+  for (const key of Object.keys(LOOK_DEFAULTS)) {
+    look[key] = Array.isArray(LOOK_DEFAULTS[key])
+      ? [...(overrides[key] || LOOK_DEFAULTS[key])]
+      : { ...LOOK_DEFAULTS[key], ...(overrides[key] || {}) };
+  }
+  return look;
+}
+
+// The original eight, in the new schema with the same values. Trail seconds
+// replace point counts: the old lengths were points at 60 fps, 30 = 0.5 s.
+const LOOKS = [
+  makeLook('Classic',     { trails: { seconds: 0.5 } }),
+  makeLook('Wireframe',   { planet: { wireframe: true }, trails: { seconds: 0.67 } }),
+  makeLook('Rays Only',   { planet: { visible: false }, trails: { seconds: 0.58 } }),
+  makeLook('Points',      { trails: { style: 'none' } }),
+  makeLook('Long Trails', { trails: { seconds: 1.0 } }),
+  makeLook('Wire Rays',   { planet: { wireframe: true }, trails: { seconds: 0.42 } }),
+  makeLook('Ghost',       { planet: { visible: false }, trails: { seconds: 0.83 } }),
+  makeLook('Dense',       { particles: { countMul: 2.5 }, trails: { seconds: 0.83 } }),
 ];
+const MODES = LOOKS;
+
+// Planet skins and particle sprites by name; the shaders branch on the index.
+const PLANET_SKINS = { nebula: 0 };
+const SPRITES = { disc: 0 };
+
+// ─── Palette from an image ───────────────────────────────────────────────────
+
+// Dominant colours of an image, Hodgin's "colors pulled procedurally from
+// input photography". A 4-bit-per-channel histogram, the most common bins
+// with a minimum distance between picks, then assignment by brightness and
+// saturation. `bg` is dimmed to near black for the dark looks; `bgLight` is
+// the raw darkest colour for a flat look.
+function paletteFromPixels(data, name = 'Image') {
+  const counts = new Map();
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 128) continue;
+    const key = ((data[i] >> 4) << 8) | ((data[i + 1] >> 4) << 4) | (data[i + 2] >> 4);
+    let e = counts.get(key);
+    if (!e) { e = { n: 0, r: 0, g: 0, b: 0 }; counts.set(key, e); }
+    e.n++; e.r += data[i]; e.g += data[i + 1]; e.b += data[i + 2];
+  }
+  const bins = [...counts.values()]
+    .map(e => ({ n: e.n, r: e.r / e.n / 255, g: e.g / e.n / 255, b: e.b / e.n / 255 }))
+    .sort((a, b) => b.n - a.n);
+  const picks = [];
+  for (const b of bins) {
+    if (picks.every(p => Math.hypot(p.r - b.r, p.g - b.g, p.b - b.b) > 0.18)) picks.push(b);
+    if (picks.length >= 6) break;
+  }
+  while (picks.length < 3) picks.push({ n: 0, r: 0.5, g: 0.55, b: 0.7 });
+
+  const lum = c => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  const sat = c => { const mx = Math.max(c.r, c.g, c.b), mn = Math.min(c.r, c.g, c.b); return mx === 0 ? 0 : (mx - mn) / mx; };
+  const scale = (c, k) => ({ r: c.r * k, g: c.g * k, b: c.b * k });
+  const toHex = c => (Math.round(Math.min(1, c.r) * 255) << 16) | (Math.round(Math.min(1, c.g) * 255) << 8) | Math.round(Math.min(1, c.b) * 255);
+  const mostSat = arr => arr.reduce((best, c) => (sat(c) > sat(best) ? c : best), arr[0]);
+
+  const byLum = [...picks].sort((a, b) => lum(a) - lum(b));
+  const bgRaw = byLum[0];
+  const rest = byLum.slice(1);
+  const midLum = lum(rest[Math.floor(rest.length / 2)]);
+  const bright = rest.filter(c => lum(c) >= midLum);
+  const dark = rest.filter(c => lum(c) < midLum);
+  const inner = mostSat(bright.length ? bright : rest);
+  const outer = dark.length ? mostSat(dark) : scale(inner, 0.45);
+  const unused = rest.filter(c => c !== inner && c !== outer);
+  const core = unused.length
+    ? unused.reduce((best, c) => (Math.abs(lum(c) - 0.5) < Math.abs(lum(best) - 0.5) ? c : best), unused[0])
+    : { r: (inner.r + outer.r) / 2, g: (inner.g + outer.g) / 2, b: (inner.b + outer.b) / 2 };
+  const bgMax = Math.max(bgRaw.r, bgRaw.g, bgRaw.b, 0.01);
+  const bgDark = scale(bgRaw, Math.min(1, 0.04 / bgMax));
+
+  return { name, core: toHex(core), rayInner: toHex(inner), rayOuter: toHex(outer), bg: toHex(bgDark), bgLight: toHex(bgRaw), fromImage: true };
+}
 
 // ─── Audio Analysis ──────────────────────────────────────────────────────────
 
@@ -365,8 +451,7 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform vec3 uColorCore;
   uniform vec3 uColorInner;
   uniform vec3 uColorOuter;
-  uniform float uMetalness;
-  uniform float uRoughness;
+  uniform float uSkin;        // PLANET_SKINS index; skins arrive with the looks that use them
   uniform vec4 uEvents[MAX_EVENTS];      // xyz: object-space direction, w: start time
   uniform float uEventKinds[MAX_EVENTS]; // 0 flare spot, 1 ripple
 
@@ -515,8 +600,7 @@ class Core {
       uColorCore:  { value: new THREE.Color(0x888899) },
       uColorInner: { value: new THREE.Color(0x6699ff) },
       uColorOuter: { value: new THREE.Color(0x2244aa) },
-      uMetalness:  { value: 0.85 },
-      uRoughness:  { value: 0.15 },
+      uSkin:       { value: 0 },
       uEvents:     { value: this.surfaceEvents },
       uEventKinds: { value: this.surfaceKinds },
     };
@@ -637,11 +721,11 @@ class Core {
     this.material.dispose();
   }
 
-  applyMode(mode, palette) {
-    this.mesh.visible = mode.coreVisible && this.alive;
-    this.material.wireframe = mode.wireframe;
-    this.uniforms.uMetalness.value = mode.metalness;
-    this.uniforms.uRoughness.value = mode.roughness;
+  applyLook(look, palette) {
+    const p = look.planet;
+    this.mesh.visible = p.visible && this.alive;
+    this.material.wireframe = p.wireframe;
+    this.uniforms.uSkin.value = PLANET_SKINS[p.skin] ?? 0;
     this.uniforms.uColorCore.value.set(palette.core);
     this.uniforms.uColorInner.value.set(palette.rayInner);
     this.uniforms.uColorOuter.value.set(palette.rayOuter);
@@ -659,6 +743,8 @@ class Core {
 //
 // All speeds are scene units per second, rates are particles per second.
 // These are the knobs to turn while watching Demo Mode.
+const TRAIL_POINTS = 200;  // ring slots per particle; at 60 fps that's 3.3 s of trail
+
 const PARTICLE_TUNING = {
   // Emission
   trickleBase:   0.02,  // steady emission at silence, fraction of count per second
@@ -701,6 +787,9 @@ const PARTICLE_TUNING = {
   maxAge:        14,    // seconds before a particle is recycled regardless
   boundaryMult:  2.2,   // lines that escape past this many extents recycle
   boundaryMin:   12,    // ...but never closer than this
+  // Charge (only when a look's sim.charge is not 'none')
+  sepRadius:     1.0,   // separation acts within this distance
+  sepMax:        8,     // neighbours considered per particle per frame
   // Collapse
   pullRadii:     4,     // a collapsing core pulls particles from this many radii out
   pullStrength:  10,    // inward acceleration at full collapse, at the core
@@ -715,8 +804,12 @@ class MagneticParticles {
     this.cores = cores;
     this.maxCount = 5000;
     this.count = initialCount;
-    this.trailLength = 30;
-    this.rayStyle = 'ribbon';
+    this.look = makeLook('default');
+    this.trailSeconds = 0.5;
+    this.trailStyle = 'line';
+    this.spriteScale = 1.0;
+    this.hueScatter = 0;
+    this._chargeRule = 'none';
     this.t = 0;
     this.emitBudget = 0;     // trickle
     this.activeCount = 0;    // particles in flight
@@ -743,7 +836,13 @@ class MagneticParticles {
     this.listenHz = new Float32Array(n);  // the frequency each particle listens to
     this.sizeMul = new Float32Array(n);   // per-particle size, so they keep their individuality
     this.phases = new Float32Array(n);    // shimmer phase offset
-    this.trails = [];                     // per-particle position history (flat xyz)
+    this.charge = new Float32Array(n);    // signed charge this frame (0 unless the look uses charge)
+    this.chargeSign = new Int8Array(n);
+    this.hueOff = new Float32Array(n);    // per-particle hue offset, scaled by the look's hueScatter
+    this.trailLen = new Uint16Array(n);   // trail points written since emission, capped
+    this._gridHeads = new Int32Array(4096);
+    this._gridNext = new Int32Array(n);
+    this._sep = [0, 0, 0];
 
     for (let i = 0; i < n; i++) {
       // Log-spaced so every octave has listeners. Uniform bins would put
@@ -752,7 +851,7 @@ class MagneticParticles {
       this.listenHz[i] = loHz * Math.pow(hiHz / loHz, Math.random());
       this.sizeMul[i] = 0.6 * Math.pow(3, Math.random());        // 0.6x .. 1.8x, log-uniform
       this.phases[i] = Math.random() * Math.PI * 2;
-      this.trails[i] = [];
+      this.hueOff[i] = Math.random() * 2 - 1;
     }
 
     // Emitter table, rebuilt every frame: cores plus cumulative weights.
@@ -770,6 +869,7 @@ class MagneticParticles {
     this.pointGeo.setAttribute('size', new THREE.BufferAttribute(this.pointSizes, 1));
 
     this.pointMat = new THREE.ShaderMaterial({
+      uniforms: { uSprite: { value: 0 } },
       vertexShader: `
         attribute float size;
         attribute vec3 color;
@@ -782,6 +882,7 @@ class MagneticParticles {
         }
       `,
       fragmentShader: `
+        uniform float uSprite;   // SPRITES index; sprites arrive with the looks that use them
         varying vec3 vColor;
         void main() {
           float d = length(gl_PointCoord - 0.5) * 2.0;
@@ -802,23 +903,52 @@ class MagneticParticles {
     this.points = new THREE.Points(this.pointGeo, this.pointMat);
     scene.add(this.points);
 
-    // --- Trail lines (ribbons) ---
-    // LineSegments geometry: a pair of vertices per segment.
-    this.maxTrailVerts = n * 60 * 2;
+    // --- Trails ---
+    // A global ring of TRAIL_POINTS slots; every active particle writes the
+    // current slot each frame (slot-major layout, so one frame's writes are
+    // one contiguous block to upload). Segments are rebuilt each frame from
+    // each particle's valid points and fade in the shader by age, so trail
+    // length is seconds, not points, and frame rate doesn't change the look.
+    this.trailSlot = 0;
+    const tp = TRAIL_POINTS * n;
+    this.trailPositions = new Float32Array(tp * 3);
+    this.trailColors = new Float32Array(tp * 3);
+    this.trailBirth = new Float32Array(tp);
+    this.trailIndex = new Uint32Array(n * (TRAIL_POINTS - 1) * 2);
     this.trailGeo = new THREE.BufferGeometry();
-    this.trailPositions = new Float32Array(this.maxTrailVerts * 3);
-    this.trailColors = new Float32Array(this.maxTrailVerts * 3);
-    this.trailGeo.setAttribute('position', new THREE.BufferAttribute(this.trailPositions, 3));
-    this.trailGeo.setAttribute('color', new THREE.BufferAttribute(this.trailColors, 3));
+    this.trailPosAttr = new THREE.BufferAttribute(this.trailPositions, 3);
+    this.trailColAttr = new THREE.BufferAttribute(this.trailColors, 3);
+    this.trailBirthAttr = new THREE.BufferAttribute(this.trailBirth, 1);
+    this.trailIdxAttr = new THREE.BufferAttribute(this.trailIndex, 1);
+    this.trailGeo.setAttribute('position', this.trailPosAttr);
+    this.trailGeo.setAttribute('color', this.trailColAttr);
+    this.trailGeo.setAttribute('birth', this.trailBirthAttr);
+    this.trailGeo.setIndex(this.trailIdxAttr);
+    this.trailGeo.setDrawRange(0, 0);
 
-    this.trailMat = new THREE.LineBasicMaterial({
-      vertexColors: true,
+    this.trailMat = new THREE.ShaderMaterial({
+      uniforms: { uNow: { value: 0 }, uSeconds: { value: 0.5 }, uOpacity: { value: 0.6 } },
+      vertexShader: `
+        attribute vec3 color;
+        attribute float birth;
+        uniform float uNow;
+        uniform float uSeconds;
+        uniform float uOpacity;
+        varying vec3 vColor;
+        void main() {
+          float fade = clamp(1.0 - (uNow - birth) / uSeconds, 0.0, 1.0);
+          vColor = color * fade * uOpacity;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vColor;
+        void main() { gl_FragColor = vec4(vColor, 1.0); }
+      `,
       transparent: true,
-      opacity: 0.6,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
-
     this.trailLines = new THREE.LineSegments(this.trailGeo, this.trailMat);
     scene.add(this.trailLines);
 
@@ -837,14 +967,89 @@ class MagneticParticles {
     this.count = next;
   }
 
-  applyMode(mode, palette) {
-    this.trailLength = mode.trailLen;
-    this.rayStyle = mode.rayStyle;
+  applyLook(look, palette) {
+    this.look = look;
+    const tr = look.trails;
+    const style = tr.style === 'none' ? 'none' : 'line';
+    if (style !== this.trailStyle) this.trailLen.fill(0);
+    this.trailStyle = style;
+    this.trailSeconds = Math.max(0.05, tr.seconds);
+    this.trailMat.uniforms.uSeconds.value = this.trailSeconds;
+    this.trailMat.uniforms.uOpacity.value = tr.opacity;
+    this.trailLines.visible = style !== 'none';
+
+    this.spriteScale = look.particles.size;
+    this.hueScatter = look.particles.hueScatter;
+    this.pointMat.uniforms.uSprite.value = SPRITES[look.particles.sprite] ?? 0;
+    this.points.visible = true;
+
     this.innerColor.set(palette.rayInner);
     this.outerColor.set(palette.rayOuter);
 
-    this.points.visible = (mode.rayStyle === 'point' || mode.rayStyle === 'ribbon' || mode.rayStyle === 'line');
-    this.trailLines.visible = (mode.rayStyle === 'ribbon' || mode.rayStyle === 'line');
+    // A new charge rule re-signs the live particles so it takes effect now.
+    if (look.sim.charge !== this._chargeRule) {
+      this._chargeRule = look.sim.charge;
+      for (let i = 0; i < this.maxCount; i++) this.chargeSign[i] = this._chargeSignFor(i);
+    }
+  }
+
+  // Sign of a particle's charge under the current look: bass listeners
+  // positive and treble negative, random, or none.
+  _chargeSignFor(i) {
+    const rule = this.look.sim.charge;
+    if (rule === 'frequency') return this.listenHz[i] < 600 ? 1 : -1;
+    if (rule === 'random') return Math.random() < 0.5 ? 1 : -1;
+    return 0;
+  }
+
+  // Spatial hash of the active particles for the separation force.
+  _cellHash(x, y, z) {
+    return (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) & 4095;
+  }
+
+  _buildGrid() {
+    const inv = 1 / PARTICLE_TUNING.sepRadius;
+    this._gridHeads.fill(-1);
+    for (let i = 0; i < this.count; i++) {
+      if (!this.active[i]) continue;
+      const i3 = i * 3;
+      const c = this._cellHash(Math.floor(this.positions[i3] * inv), Math.floor(this.positions[i3 + 1] * inv), Math.floor(this.positions[i3 + 2] * inv));
+      this._gridNext[i] = this._gridHeads[c];
+      this._gridHeads[c] = i;
+    }
+  }
+
+  // Short-range push away from the nearest neighbours, scaled by both
+  // charges' magnitudes. Writes an acceleration into this._sep.
+  _separationForce(i, px, py, pz, k) {
+    const T = PARTICLE_TUNING;
+    const h = T.sepRadius, inv = 1 / h, h2 = h * h;
+    const cx = Math.floor(px * inv), cy = Math.floor(py * inv), cz = Math.floor(pz * inv);
+    const qi = Math.abs(this.charge[i]) || 0.3;
+    let fx = 0, fy = 0, fz = 0, found = 0;
+    for (let ox = -1; ox <= 1 && found < T.sepMax; ox++) {
+      for (let oy = -1; oy <= 1 && found < T.sepMax; oy++) {
+        for (let oz = -1; oz <= 1 && found < T.sepMax; oz++) {
+          let j = this._gridHeads[this._cellHash(cx + ox, cy + oy, cz + oz)];
+          while (j !== -1 && found < T.sepMax) {
+            if (j !== i) {
+              const j3 = j * 3;
+              const dx = px - this.positions[j3], dy = py - this.positions[j3 + 1], dz = pz - this.positions[j3 + 2];
+              const d2 = dx * dx + dy * dy + dz * dz;
+              if (d2 < h2 && d2 > 1e-6) {
+                const d = Math.sqrt(d2);
+                const f = k * qi * (Math.abs(this.charge[j]) || 0.3) / (d2 + 0.05);
+                fx += dx / d * f; fy += dy / d * f; fz += dz / d * f;
+                found++;
+              }
+            }
+            j = this._gridNext[j];
+          }
+        }
+      }
+    }
+    this._sep[0] = fx; this._sep[1] = fy; this._sep[2] = fz;
+    return this._sep;
   }
 
   // Sources for this frame. Positive cores emit, weighted by charge. If none
@@ -960,7 +1165,8 @@ class MagneticParticles {
     this.ages[i] = 0;
     this.kicks[i] = 0;
     this.brightness[i] = 0;
-    this.trails[i].length = 0;
+    this.trailLen[i] = 0;
+    this.chargeSign[i] = this._chargeSignFor(i);
   }
 
   _sleep(i) {
@@ -968,7 +1174,7 @@ class MagneticParticles {
     this.active[i] = 0;
     this.brightness[i] = 0;
     this.pointSizes[i] = 0;
-    this.trails[i].length = 0;
+    this.trailLen[i] = 0;
   }
 
   // One-time outward impulse for everything a dying core had gathered in.
@@ -1084,6 +1290,20 @@ class MagneticParticles {
     const steerBase = Math.min(1, dt * T.steer);
     const shimmerT = this.t * 6;
 
+    // Charge forces, only when the look asks for them. Strength follows
+    // loudness ("audio data can then influence the particles' charge and
+    // strength of the forces applied").
+    const sim = this.look.sim;
+    const useCharge = sim.charge !== 'none';
+    const loudGain = 0.5 + 0.5 * volume;
+    const coulomb = useCharge ? sim.coulomb * loudGain : 0;
+    const separation = useCharge ? sim.separation * loudGain : 0;
+    if (separation > 0) this._buildGrid();
+
+    // Trail ring: advance the shared slot once per frame.
+    if (this.trailStyle !== 'none') this.trailSlot = (this.trailSlot + 1) % TRAIL_POINTS;
+    const slotBase = this.trailSlot * this.maxCount;
+
     for (let i = 0; i < this.count; i++) {
       const i3 = i * 3;
 
@@ -1115,6 +1335,9 @@ class MagneticParticles {
       let vx = this.velocities[i3], vy = this.velocities[i3 + 1], vz = this.velocities[i3 + 2];
       const age = this.ages[i];
       const src = this.escaped[i] ? null : this.sourceCore[i];
+      const freqAmp = audio.getFreqAt(this.listenHz[i]);
+      const q = useCharge ? this.chargeSign[i] * (0.3 + 0.7 * freqAmp) * sim.chargeGain : 0;
+      this.charge[i] = q;
 
       // Field at p, gravity from every core, the collapse pull, and surface
       // contact. The particle's own source is handled separately while it's
@@ -1137,10 +1360,10 @@ class MagneticParticles {
         if (d2 < surface * surface && age > 0.05 && ct < 0.3) { absorbedBy = core; break; }
 
         const d = Math.sqrt(d2 + 0.05);
-        const q = core.effectiveCharge / (d * d * d);
-        fx += q * dx;
-        fy += q * dy;
-        fz += q * dz;
+        const qf = core.effectiveCharge / (d * d * d);
+        fx += qf * dx;
+        fy += qf * dy;
+        fz += qf * dz;
 
         // Gravity, same scaling as the launch phase: escape speed off any
         // surface is sqrt(2 * srcGravity). Momentum carries through flybys.
@@ -1149,9 +1372,17 @@ class MagneticParticles {
           const reach = core.radius * T.pullRadii + 1;
           if (d < reach) a += (1 - d / reach) * ct * ct * T.pullStrength;
         }
+        // Coulomb: like signs repel, so a positive particle is pushed off a
+        // positive core and drawn to a negative one. Negative of the gravity
+        // direction when the product is positive.
+        if (coulomb !== 0) a -= coulomb * q * core.effectiveCharge / Math.max(d2, surface * surface * 0.25);
         gx -= dx / d * a;
         gy -= dy / d * a;
         gz -= dz / d * a;
+      }
+      if (separation > 0) {
+        const f = this._separationForce(i, px, py, pz, separation);
+        gx += f[0]; gy += f[1]; gz += f[2];
       }
       if (absorbedBy) {
         absorbedBy.addSurfaceEvent(px, py, pz, 1, time);
@@ -1216,7 +1447,6 @@ class MagneticParticles {
       // the poles. Launch energy is the cruising speed, so a particle thrown
       // by a hard kick stays fast for its whole trip and a soft one drifts;
       // its live bin adds a little on top.
-      const freqAmp = audio.getFreqAt(this.listenHz[i]);
       const fmag = Math.sqrt(fx * fx + fy * fy + fz * fz);
       let tx = 0, ty = 0, tz = 0;
       if (fmag > 1e-6) {
@@ -1265,17 +1495,6 @@ class MagneticParticles {
       this.positions[i3] = px; this.positions[i3 + 1] = py; this.positions[i3 + 2] = pz;
       this.velocities[i3] = vx; this.velocities[i3 + 1] = vy; this.velocities[i3 + 2] = vz;
 
-      // Store trail
-      if (this.trailLength > 0) {
-        const trail = this.trails[i];
-        trail.push(px, py, pz);
-        // Each position is 3 floats, so max entries = trailLength * 3
-        const maxEntries = this.trailLength * 3;
-        if (trail.length > maxEntries) {
-          trail.splice(0, trail.length - maxEntries);
-        }
-      }
-
       // Brightness: fade in after emission, lift with the particle's own
       // bin, and sit a little lower overall when the music is quiet.
       const bright = Math.min(1, this.ages[i] / T.fadeIn) * (0.55 + freqAmp * 0.45) * (0.6 + volume * 0.4);
@@ -1286,11 +1505,22 @@ class MagneticParticles {
       this.pointPositions[i3 + 2] = pz;
 
       const c = this._tmpColorParticle.lerpColors(this.outerColor, this.innerColor, freqAmp);
+      if (this.hueScatter > 0) c.offsetHSL(this.hueOff[i] * this.hueScatter, 0, 0);
       this.pointColors[i3]     = c.r * bright;
       this.pointColors[i3 + 1] = c.g * bright;
       this.pointColors[i3 + 2] = c.b * bright;
 
-      this.pointSizes[i] = T.pointSize * (0.6 + freqAmp * 0.8) * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]) * (0.5 + 0.5 * bright);
+      this.pointSizes[i] = T.pointSize * this.spriteScale * (0.6 + freqAmp * 0.8) * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]) * (0.5 + 0.5 * bright);
+
+      // Trail point for this frame
+      if (this.trailStyle !== 'none') {
+        const v = slotBase + i;
+        const v3 = v * 3;
+        this.trailPositions[v3] = px; this.trailPositions[v3 + 1] = py; this.trailPositions[v3 + 2] = pz;
+        this.trailColors[v3] = c.r * bright; this.trailColors[v3 + 1] = c.g * bright; this.trailColors[v3 + 2] = c.b * bright;
+        this.trailBirth[v] = this.t;
+        if (this.trailLen[i] < TRAIL_POINTS) this.trailLen[i]++;
+      }
     }
 
     // Zero out unused points
@@ -1303,67 +1533,38 @@ class MagneticParticles {
     this.pointGeo.attributes.size.needsUpdate = true;
     this.pointGeo.setDrawRange(0, this.count);
 
-    // Update trail geometry
-    this._updateTrails();
+    this._buildTrailIndex();
   }
 
-  _updateTrails() {
-    if (this.trailLength === 0) {
-      this.trailGeo.setDrawRange(0, 0);
-      return;
-    }
-
-    let vertIdx = 0;
-    const maxVerts = this.maxTrailVerts;
-
-    for (let i = 0; i < this.count; i++) {
-      const trail = this.trails[i];
-      const numPoints = trail.length / 3;
-      if (numPoints < 2) continue;
-
-      const bright = this.brightness[i];
-
-      for (let j = 0; j < numPoints - 1 && vertIdx < maxVerts - 1; j++) {
-        const j3 = j * 3;
-        const alphaA = (j / numPoints) * bright;
-        const alphaB = ((j + 1) / numPoints) * bright;
-
-        const vA = vertIdx * 3;
-        const vB = (vertIdx + 1) * 3;
-
-        this.trailPositions[vA]     = trail[j3];
-        this.trailPositions[vA + 1] = trail[j3 + 1];
-        this.trailPositions[vA + 2] = trail[j3 + 2];
-
-        this.trailPositions[vB]     = trail[j3 + 3];
-        this.trailPositions[vB + 1] = trail[j3 + 4];
-        this.trailPositions[vB + 2] = trail[j3 + 5];
-
-        // Color fades along trail
-        const cA = this._tmpColorA.lerpColors(this.outerColor, this.innerColor, alphaA);
-        const cB = this._tmpColorB.lerpColors(this.outerColor, this.innerColor, alphaB);
-
-        this.trailColors[vA]     = cA.r * alphaA;
-        this.trailColors[vA + 1] = cA.g * alphaA;
-        this.trailColors[vA + 2] = cA.b * alphaA;
-
-        this.trailColors[vB]     = cB.r * alphaB;
-        this.trailColors[vB + 1] = cB.g * alphaB;
-        this.trailColors[vB + 2] = cB.b * alphaB;
-
-        vertIdx += 2;
+  // Segments for every active particle's valid trail points, newest first,
+  // stopping at the look's trail duration. Uploads only this frame's slot
+  // block of points and the used part of the index.
+  _buildTrailIndex() {
+    const idx = this.trailIndex;
+    let k = 0;
+    if (this.trailStyle !== 'none') {
+      const n = this.maxCount, P = TRAIL_POINTS;
+      for (let i = 0; i < this.count; i++) {
+        const len = this.trailLen[i];
+        if (len < 2) continue;
+        let slot = this.trailSlot;
+        for (let j = 1; j < len; j++) {
+          const prev = (slot - 1 + P) % P;
+          const vPrev = prev * n + i;
+          if (this.t - this.trailBirth[vPrev] > this.trailSeconds) break;
+          idx[k++] = slot * n + i;
+          idx[k++] = vPrev;
+          slot = prev;
+        }
       }
+      const slotBase = this.trailSlot * n;
+      this.trailPosAttr.clearUpdateRanges(); this.trailPosAttr.addUpdateRange(slotBase * 3, this.count * 3); this.trailPosAttr.needsUpdate = true;
+      this.trailColAttr.clearUpdateRanges(); this.trailColAttr.addUpdateRange(slotBase * 3, this.count * 3); this.trailColAttr.needsUpdate = true;
+      this.trailBirthAttr.clearUpdateRanges(); this.trailBirthAttr.addUpdateRange(slotBase, this.count); this.trailBirthAttr.needsUpdate = true;
+      this.trailIdxAttr.clearUpdateRanges(); this.trailIdxAttr.addUpdateRange(0, Math.max(1, k)); this.trailIdxAttr.needsUpdate = true;
     }
-
-    // Zero remaining
-    for (let v = vertIdx * 3; v < Math.min((vertIdx + 100) * 3, this.trailPositions.length); v++) {
-      this.trailPositions[v] = 0;
-      this.trailColors[v] = 0;
-    }
-
-    this.trailGeo.attributes.position.needsUpdate = true;
-    this.trailGeo.attributes.color.needsUpdate = true;
-    this.trailGeo.setDrawRange(0, vertIdx);
+    this.trailGeo.setDrawRange(0, k);
+    this.trailMat.uniforms.uNow.value = this.t;
   }
 }
 
@@ -1372,6 +1573,7 @@ class MagneticParticles {
 class Nebula {
   constructor(scene) {
     this.enabled = false;
+    this.forced = null;   // a look can force the nebula on or off; null follows the B key
     this.sprites = [];
 
     const spriteCount = 12;
@@ -1421,7 +1623,8 @@ class Nebula {
 
   update(audio) {
     const volume = audio.getVolume();
-    const targetOpacity = this.enabled ? 1.0 : 0;
+    const on = this.forced === null ? this.enabled : this.forced;
+    const targetOpacity = on ? 1.0 : 0;
 
     for (const s of this.sprites) {
       const target = targetOpacity * (s.baseOpacity + volume * 0.25);
@@ -1430,12 +1633,10 @@ class Nebula {
     }
   }
 
-  applyPalette(palette) {
-    // Tint nebula sprites toward palette color
+  applyLook(look, palette) {
     const col = new THREE.Color(palette.rayOuter);
-    for (const s of this.sprites) {
-      s.mat.color = col;
-    }
+    for (const s of this.sprites) s.mat.color = col;
+    this.forced = look.scene.nebula === 'auto' ? null : look.scene.nebula === 'on';
   }
 }
 
@@ -1495,6 +1696,7 @@ class Visualizer {
     this.frozenOffset = 0;   // accumulated time spent frozen
     this.modeIndex = 0;
     this.paletteIndex = 0;
+    this.bloomLevel = 1.0;
     this.particleCount = 500;
     this.clock = new THREE.Clock();
 
@@ -1519,7 +1721,7 @@ class Visualizer {
     this._initNebula();
     this._initPostProcessing();
     this._bindEvents();
-    this._applyModeAndPalette();
+    this._applyLook();
   }
 
   _initRenderer() {
@@ -1798,9 +2000,7 @@ class Visualizer {
   }
 
   _applyModeToCore(core) {
-    const mode = MODES[this.modeIndex];
-    const palette = PALETTES[this.paletteIndex];
-    core.applyMode(mode, palette);
+    core.applyLook(LOOKS[this.modeIndex], PALETTES[this.paletteIndex]);
   }
 
   // n-body integration for the cores. Gravitational attraction between cores
@@ -1938,28 +2138,49 @@ class Visualizer {
     this.composer.addPass(this.bloomPass);
   }
 
-  _applyModeAndPalette() {
-    const mode = MODES[this.modeIndex];
+  _applyLook() {
+    const look = LOOKS[this.modeIndex];
     const palette = PALETTES[this.paletteIndex];
 
-    for (const core of this.cores) {
-      this._applyModeToCore(core);
-    }
-    this.particles.applyMode(mode, palette);
-    this.nebula.applyPalette(palette);
+    for (const core of this.cores) core.applyLook(look, palette);
+    this.particles.applyLook(look, palette);
+    this.nebula.applyLook(look, palette);
 
-    // Apply particle multiplier from mode
-    const effectiveCount = Math.min(5000, Math.round(this.particleCount * (mode.particleMul || 1.0)));
+    const effectiveCount = Math.min(5000, Math.round(this.particleCount * look.particles.countMul));
     this.particles.setCount(effectiveCount);
 
-    this.scene.background.set(palette.bg);
-    this.scene.fog.color.set(palette.bg);
+    const bg = (look.scene.background === 'light' && palette.bgLight !== undefined) ? palette.bgLight : palette.bg;
+    this.scene.background.set(bg);
+    this.scene.fog.color.set(bg);
+    this.scene.fog.density = look.scene.fog ? 0.006 : 0;
+    this.bloomLevel = look.scene.bloom;
 
     this._updateInfo();
   }
 
+  // Build a palette from an image file (button or drag-and-drop) and switch to it.
+  async _loadPaletteImage(file) {
+    try {
+      const bitmap = await createImageBitmap(file);
+      const size = 64;
+      const canvas = document.createElement('canvas');
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(bitmap, 0, 0, size, size);
+      const data = ctx.getImageData(0, 0, size, size).data;
+      const name = file.name.replace(/\.[^.]+$/, '').slice(0, 18) || 'Image';
+      const palette = paletteFromPixels(data, name);
+      const existing = PALETTES.findIndex(p => p.fromImage && p.name === name);
+      if (existing >= 0) PALETTES[existing] = palette; else PALETTES.push(palette);
+      this.paletteIndex = existing >= 0 ? existing : PALETTES.length - 1;
+      this._applyLook();
+    } catch (err) {
+      console.error('Palette from image failed:', err);
+    }
+  }
+
   _updateInfo() {
-    const mode = MODES[this.modeIndex];
+    const mode = LOOKS[this.modeIndex];
     const palette = PALETTES[this.paletteIndex];
     const el = document.getElementById('info-text');
     el.innerHTML = `${mode.name} / ${palette.name}<br>${this.particles.activeCount} / ${this.particleCount} particles${this.targetBodies ? ` / ${this.targetBodies} planets` : ''}${this.nebula.enabled ? ' / nebula' : ''}${this.frozen ? ' / frozen' : ''}`;
@@ -1989,12 +2210,12 @@ class Visualizer {
 
       switch (key.toLowerCase()) {
         case 'm':
-          this.modeIndex = (this.modeIndex + 1) % MODES.length;
-          this._applyModeAndPalette();
+          this.modeIndex = (this.modeIndex + 1) % LOOKS.length;
+          this._applyLook();
           break;
         case 'p':
           this.paletteIndex = (this.paletteIndex + 1) % PALETTES.length;
-          this._applyModeAndPalette();
+          this._applyLook();
           break;
         case 'f':
           this.frozen = !this.frozen;
@@ -2006,8 +2227,8 @@ class Visualizer {
           this._updateInfo();
           break;
         case 'n':
-          this.modeIndex = (this.modeIndex - 1 + MODES.length) % MODES.length;
-          this._applyModeAndPalette();
+          this.modeIndex = (this.modeIndex - 1 + LOOKS.length) % LOOKS.length;
+          this._applyLook();
           break;
         case 'a':
           this.particleCount = Math.min(5000, this.particleCount + 200);
@@ -2043,6 +2264,20 @@ class Visualizer {
       if (e.target.files[0]) this._startFile(e.target.files[0]);
     });
     document.getElementById('btn-demo').addEventListener('click', () => this._startDemo());
+
+    // Palette from an image: the start-panel button, or drop an image anywhere.
+    document.getElementById('btn-image').addEventListener('click', () => {
+      document.getElementById('image-input').click();
+    });
+    document.getElementById('image-input').addEventListener('change', (e) => {
+      if (e.target.files[0]) this._loadPaletteImage(e.target.files[0]);
+    });
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const file = e.dataTransfer && e.dataTransfer.files[0];
+      if (file && file.type.startsWith('image/')) this._loadPaletteImage(file);
+    });
   }
 
   async _startCapture() {
@@ -2192,7 +2427,7 @@ class Visualizer {
     this.starfield.rotation.y += 0.00008;
 
     // Bloom reacts to volume
-    this.bloomPass.strength = 0.5 + volume * 0.6 + hit * 0.4;
+    this.bloomPass.strength = (0.5 + volume * 0.6 + hit * 0.4) * this.bloomLevel;
 
     this.composer.render();
   }

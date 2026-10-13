@@ -54,10 +54,14 @@ for (let n = 1; n <= 5; n++) {
 
 // ── Lock up: 3 -> 5 adds two satellites on near-circular orbits outside ──
 {
-  const v = mkViz(0); v._spawnSystem(3);
-  for (const c of v.cores) { c.phase = 'alive'; c.scaleT = 1; }
+  // A solar base (spawn(3) is solar or trinary at random), lifetimes pinned so
+  // nothing dies inside the window.
+  let v;
+  do { v = mkViz(0); v._spawnSystem(3); } while (!v.cores.some(c => c.role === 'central'));
+  for (const c of v.cores) { c.phase = 'alive'; c.scaleT = 1; c.lifeDuration = 1e9; }
   const before = live(v).length;
   v.targetBodies = 5; v._applyTargetBodies();
+  for (const c of v.cores) c.lifeDuration = 1e9;
   const added = v.cores.slice(before);
   check(live(v).length === 5 && added.length === 2 && added.every(c => c.role === 'satellite' && c.phase === 'spawning'), 'lock 3->5 adds two spawning satellites');
   const M = v.cores.reduce((m, c) => m + c.mass, 0);

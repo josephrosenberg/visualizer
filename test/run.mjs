@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const suites = ['smoke-particles.mjs', 'smoke-audio.mjs', 'smoke-planets.mjs'];
+const suites = ['smoke-particles.mjs', 'smoke-audio.mjs', 'smoke-planets.mjs', 'smoke-looks.mjs'];
 let failed = 0;
 for (const f of suites) {
   console.log(`\n=== ${f}`);

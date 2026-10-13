@@ -123,7 +123,7 @@
       transition: opacity 0.5s;
     }
 
-    #file-input { display: none; }
+    #file-input, #image-input { display: none; }
 
     #help-overlay {
       position: fixed;
@@ -204,6 +204,10 @@
       <button class="btn" id="btn-file">Load Audio File</button>
       <button class="btn" id="btn-demo">Demo Mode</button>
       <input type="file" id="file-input" accept="audio/*">
+      <div style="margin-top: 10px">
+        <button class="btn" id="btn-image">Palette from Image</button>
+        <input type="file" id="image-input" accept="image/*">
+      </div>
       <div class="keys">
         <kbd>M</kbd>/<kbd>N</kbd> mode &nbsp;
         <kbd>P</kbd> palette &nbsp;
@@ -228,6 +232,7 @@
       <div class="help-row"><span>Remove particles</span> <kbd>S</kbd></div>
       <div class="help-row"><span>Number of planets</span> <kbd>1</kbd>-<kbd>5</kbd></div>
       <div class="help-row"><span>Planets back to automatic</span> <kbd>0</kbd></div>
+      <div class="help-row"><span>Palette from an image</span> <kbd>drop</kbd></div>
       <div class="help-row"><span>Show / hide help</span> <kbd>?</kbd></div>
       <div class="help-dismiss">Press <kbd>?</kbd> or <kbd>Esc</kbd> to close</div>
     </div>
@@ -245,6 +250,6 @@
     }
   }
   </script>
-  <script type="module" src="visualizer.js?v=30"></script>
+  <script type="module" src="visualizer.js?v=31"></script>
 </body>
 </html>

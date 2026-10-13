@@ -3,7 +3,7 @@
 // Run: node test/smoke-particles.mjs   (or node test/run.mjs for all)
 import { performance } from 'node:perf_hooks';
 import { load } from './harness.mjs';
-const { Core, MagneticParticles, PARTICLE_TUNING, THREE } = await load();
+const { Core, MagneticParticles, PARTICLE_TUNING, makeLook, PALETTES, TRAIL_POINTS, THREE } = await load();
 
 
 const scene = { add(){}, remove(){} };
@@ -228,6 +228,105 @@ for (const [label, amp, wantBounce] of [['cold listeners', 0.05, true], ['hot li
   check(stats.bySource > 100 && stats.boundary > 50, 'lone sun: some fall back, some escape');
   check(q(0.9) > q(0.1) + 0.3, 'lone sun: fall-backs reach a spread of heights');
   check(shell <= (stats.bySource + stats.boundary + stats.aged) * 0.01, 'lone sun: no shell of particles hovering for seconds');
+}
+
+// ── Scenario 6: trail ring buffer ───────────────────────────────────────────
+{
+  const cores = solar();
+  const audio = mkAudio();
+  const p = new MagneticParticles(scene, cores, 1500);
+  const N = p.maxCount;
+  p.applyLook(makeLook('t', { trails: { seconds: 0.5 } }), PALETTES[0]);
+  const ctx = { barycenter: V(0,0,0), extent: 6, died: [], time: 0 };
+  run(p, audio, cores, ctx, 12);
+  let ok = true, active = 0;
+  for (let i = 0; i < p.count; i++) if (p.active[i]) { active++; if (p.trailLen[i] < 1 || p.trailLen[i] > 12) ok = false; }
+  check(active > 0 && ok, 'active particles accumulate one trail point per frame');
+  const validIndex = () => {
+    const k = p.trailGeo.drawRange.count;
+    if (k % 2 !== 0) return false;
+    for (let m = 0; m < k; m += 2) {
+      const a = p.trailIndex[m], b = p.trailIndex[m + 1];
+      if (a >= TRAIL_POINTS * N || b >= TRAIL_POINTS * N || a % N !== b % N) return false;
+    }
+    return true;
+  };
+  check(p.trailGeo.drawRange.count > 0 && validIndex(), 'segments link consecutive points of the same particle');
+  run(p, audio, cores, ctx, 260);                       // past the 200-slot wrap
+  let capped = true; for (let i = 0; i < p.count; i++) if (p.trailLen[i] > TRAIL_POINTS) capped = false;
+  check(capped && p.trailSlot < TRAIL_POINTS && validIndex(), 'ring wraps without overflow or cross-links');
+  let segs = 0, maxSegs = 0;
+  for (let i = 0; i < p.count; i++) if (p.active[i]) maxSegs += Math.min(p.trailLen[i] - 1, 32);
+  segs = p.trailGeo.drawRange.count / 2;
+  check(segs > 0 && segs <= maxSegs, `trail duration caps segments (${segs} of at most ${maxSegs})`);
+  let i0 = -1; for (let i = 0; i < p.count; i++) if (p.active[i]) { i0 = i; break; }
+  p._sleep(i0);
+  const lenAfterSleep = p.trailLen[i0];
+  run(p, audio, cores, ctx, 1);                          // it may be re-emitted here, with at most one new point
+  let linked = false; for (let m = 0; m < p.trailGeo.drawRange.count; m++) if (p.trailIndex[m] % N === i0) linked = true;
+  check(lenAfterSleep === 0 && p.trailLen[i0] <= 1 && !linked, 'a recycled particle drops its trail at once');
+  p.applyLook(makeLook('n', { trails: { style: 'none' } }), PALETTES[0]);
+  run(p, audio, cores, ctx, 5);
+  check(p.trailGeo.drawRange.count === 0, "trails 'none' draws nothing");
+  const up = p.trailPosAttr.updateRanges;
+  p.applyLook(makeLook('t2', { trails: { seconds: 0.5 } }), PALETTES[0]);
+  run(p, audio, cores, ctx, 1);
+  check(p.trailPosAttr.updateRanges.length === 1 && p.trailPosAttr.updateRanges[0].count === p.count * 3, "only this frame's slot block is uploaded");
+}
+
+// ── Scenario 7: separation spreads neighbours ───────────────────────────────
+{
+  // Share of sampled active particles whose nearest neighbour is closer than 0.3 units.
+  const crowded = (p) => {
+    const act = []; for (let i = 0; i < p.count; i++) if (p.active[i]) act.push(i);
+    if (act.length < 20) return 0;
+    const step = Math.max(1, Math.floor(act.length / 200));
+    let close = 0, n = 0;
+    for (let a = 0; a < act.length; a += step) {
+      const i = act[a], i3 = i * 3; let best = Infinity;
+      for (const j of act) { if (j === i) continue; const j3 = j * 3; const d = Math.hypot(p.positions[i3]-p.positions[j3], p.positions[i3+1]-p.positions[j3+1], p.positions[i3+2]-p.positions[j3+2]); if (d < best) best = d; }
+      if (best < 0.3) close++; n++;
+    }
+    return close / n;
+  };
+  const nn = {};
+  for (const sep of [0, 12]) {
+    const cores = solar();
+    const p = new MagneticParticles(scene, cores, 1500);
+    p.applyLook(makeLook('s', { sim: { charge: 'random', separation: sep } }), PALETTES[0]);
+    const ctx = { barycenter: V(0,0,0), extent: 6, died: [], time: 0 };
+    run(p, mkAudio(), cores, ctx, 600);
+    nn[sep] = crowded(p);
+    check(!anyNaN(p), `separation ${sep}: no NaN`);
+  }
+  console.log(`crowded share (neighbour within 0.3): separation off ${nn[0].toFixed(3)}, on ${nn[12].toFixed(3)}`);
+  check(nn[12] < nn[0] * 0.7, 'separation thins out crowded particles');
+}
+
+// ── Scenario 8: Coulomb sorts landings by sign ──────────────────────────────
+{
+  const cores = solar();
+  const p = new MagneticParticles(scene, cores, 1500);
+  p.applyLook(makeLook('c', { sim: { charge: 'random', coulomb: 14 } }), PALETTES[0]);
+  const tally = { posToNeg: 0, posToPos: 0, negToNeg: 0, negToPos: 0 };
+  const orig = p._sleep.bind(p);
+  p._sleep = (i) => {
+    const i3 = i*3, x = p.positions[i3], y = p.positions[i3+1], z = p.positions[i3+2];
+    for (const c of cores) {
+      if (Math.hypot(x-c.position.x, y-c.position.y, z-c.position.z) < c.radius*1.08+0.05) {
+        const key = (p.chargeSign[i] > 0 ? 'pos' : 'neg') + 'To' + (c.charge > 0 ? 'Pos' : 'Neg');
+        tally[key]++;
+      }
+    }
+    orig(i);
+  };
+  const ctx = { barycenter: V(0,0,0), extent: 6, died: [], time: 0 };
+  run(p, mkAudio({ amp: 0.6, spread: true }), cores, ctx, 900);
+  const posSinkFrac = tally.posToNeg / Math.max(1, tally.posToNeg + tally.posToPos);
+  const negSinkFrac = tally.negToNeg / Math.max(1, tally.negToNeg + tally.negToPos);
+  console.log('coulomb landings', JSON.stringify(tally), `sink share: + ${posSinkFrac.toFixed(2)}, - ${negSinkFrac.toFixed(2)}`);
+  check(!anyNaN(p), 'coulomb: no NaN');
+  check(posSinkFrac > negSinkFrac + 0.1, 'positive particles reach the negative sinks more than negative ones do');
 }
 
 // ── Scenario 4: lone sink, emitters fall back ─────────────────────────────
