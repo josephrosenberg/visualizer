@@ -1,7 +1,7 @@
 // Looks schema and application, and the palette-from-image picker.
 // Run: node test/smoke-looks.mjs   (or node test/run.mjs for all)
 import { load } from './harness.mjs';
-const { Core, MagneticParticles, PARTICLE_TUNING, LOOKS, makeLook, PALETTES, paletteFromPixels, RAY_COUNT, LINK_MAX_PAIRS, THREE } = await load();
+const { Core, MagneticParticles, PARTICLE_TUNING, LOOKS, makeLook, PALETTES, paletteFromPixels, RAY_COUNT, LINK_MAX_PAIRS, RIBBON_POINTS, RIBBON_NONE, SHARD_MAX, lightBackground, THREE } = await load();
 
 let failures = 0;
 const check = (ok, msg) => { console.log((ok ? 'PASS ' : 'FAIL ') + msg); if (!ok) failures++; };
@@ -12,9 +12,10 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
 
 // ── Schema ──
 {
-  const sections = ['planet', 'particles', 'trails', 'sim', 'scene', 'extras', 'links', 'rays'];
+  const sections = ['planet', 'particles', 'trails', 'sim', 'scene', 'extras', 'links', 'rays', 'ribbons', 'shards'];
   const names = LOOKS.map(l => l.name);
-  check(LOOKS.length === 11 && names[0] === 'Classic' && names[7] === 'Dense' && names[8] === 'Comets' && names[9] === 'Anemone' && names[10] === 'Starburst', `the original eight looks plus Comets, Anemone and Starburst are present (${names.join(', ')})`);
+  check(LOOKS.length === 13 && names[0] === 'Classic' && names[7] === 'Dense' && names[8] === 'Comets' && names[9] === 'Anemone' && names[10] === 'Starburst' && names[11] === 'Ribbons' && names[12] === 'Paper', `the original eight looks plus Comets, Anemone, Starburst, Ribbons and Paper are present (${names.join(', ')})`);
+  check(LOOKS.slice(0, 11).every(l => l.trails.style !== 'ribbon' && !l.extras.includes('shards') && l.planet.skin !== 'paper' && l.particles.sprite !== 'flat' && l.scene.background === 'dark' && l.scene.bloom > 0 && l.ribbons.shade === 'lit' && l.ribbons.width === 0.14 && l.shards.perHit === 6), 'no earlier look owns the ribbon style, the shards pass, the paper skin, the flat sprite, a light ground or a bloom of 0; the ribbons and shards sections sit at their defaults');
   check(LOOKS.slice(0, 9).every(l => !l.trails.drain && l.sim.emission === 'spots' && l.sim.energy === 1 && l.sim.speed === 1 && l.sim.trickle === 1 && l.sim.poolQuiet === null && l.scene.nebulaGain === 1 && l.scene.stars === true), 'the Anemone fields sit at their no-op defaults for the nine earlier looks');
   check(LOOKS.slice(0, 10).every(l => l.extras.length === 0 && l.scene.haze === 0 && l.planet.skin !== 'silhouette' && l.particles.sprite !== 'star'), 'no earlier look owns an extras pass, a haze, the silhouette skin or the star sprite');
   check(LOOKS.every(l => sections.every(k => k in l)), 'every look has every section');
@@ -39,7 +40,10 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
         for (let f = 0; f < 30; f++) { ctx.time += 1 / 60; p.update(audio, 1 / 60, ctx); }
         if (look.planet.visible !== cores[0].mesh.visible) throw new Error(`${look.name}: planet visibility not applied`);
         if (look.planet.wireframe !== cores[0].material.wireframe) throw new Error(`${look.name}: wireframe not applied`);
-        if ((look.trails.style === 'none') !== (p.trailGeo.drawRange.count === 0)) throw new Error(`${look.name}: trail style not applied`);
+        const noLines = look.trails.style === 'none' || look.trails.style === 'ribbon';
+        if (noLines !== (p.trailGeo.drawRange.count === 0)) throw new Error(`${look.name}: trail style not applied`);
+        if ((look.trails.style === 'ribbon') !== !!(p.ribbonMesh && p.ribbonMesh.visible)) throw new Error(`${look.name}: ribbon style not applied`);
+        if (look.extras.includes('shards') !== !!(p.shardMesh && p.shardMesh.visible)) throw new Error(`${look.name}: shards visibility not applied`);
         if (look.extras.includes('links') !== p.linkLines.visible) throw new Error(`${look.name}: links visibility not applied`);
         if (!look.extras.includes('links') && p.linkGeo.drawRange.count !== 0) throw new Error(`${look.name}: links drawn without the pass`);
         if (look.extras.includes('rays') !== cores[0].rays.visible) throw new Error(`${look.name}: rays visibility not applied`);
@@ -177,6 +181,127 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
   check(!p.linkLines.visible && p.linkGeo.drawRange.count === 0 && p.linkPairs === 0 && !cores[0].rays.visible, 'Classic hides the links and the rays and draws no pair');
 }
 
+// ── Ribbons: flat strips over a two-vertex ring (written once, expanded on the GPU through a static doubled index), links, shards ──
+{
+  const look = LOOKS.find(l => l.name === 'Ribbons');
+  const cores = [mkCore(0, 1, 2, V(0, 0, 0)), mkCore(1, -0.8, 0.6, V(5, 0, 0))];
+  const p = new MagneticParticles(scene, cores, 1500);
+  check(p.ribbonGeo === null && p.shardGeo === null, 'ribbon and shard buffers are not built until a look asks for them');
+  for (const c of cores) c.applyLook(look, PALETTES[7]);
+  p.applyLook(look, PALETTES[7]);
+  check(p.trailStyle === 'ribbon' && p.ribbonMesh.visible && !p.trailLines.visible && p.trailGeo.drawRange.count === 0 && p.linkLines.visible && p.shardMesh.visible && p.pointMat.uniforms.uSprite.value === 0 && p.ribbonMat.uniforms.uFlat.value === 0 && p.ribbonMat.blending === THREE.AdditiveBlending && p.pointMat.blending === THREE.AdditiveBlending && cores[0].uniforms.uSkin.value === 0, 'Ribbons draws the strip mesh instead of the line trails, with the links and the shards, lit and additive, on nebula planets');
+  const n = p.maxCount, P = RIBBON_POINTS, secs = p.ribbonMat.uniforms.uSeconds.value;
+  check(secs <= (P - 2) / 60 + 1e-9 && secs >= 1.5, `the strand lasts ${secs.toFixed(3)} s, within the ring`);
+  const hitAudio = { ...audio, frame: 0, getOnset: () => hitAudio.frame % 30 === 0 };
+  const ctx = { barycenter: V(0, 0, 0), extent: 6, died: [], time: 0 };
+  let landed = -1, capBirth = 0, capSlot = -1;
+  const orig = p._sleep.bind(p);
+  p._sleep = (i) => { const was = p.active[i] && p.trailLen[i] > 10; const head = p.rbHead[i]; orig(i); if (landed < 0 && was) { landed = i; capSlot = head; capBirth = p.rbBirth[(head * n + i) * 2 + 1]; } };
+  let ms = 0, thrownOffHit = 0;
+  for (let f = 0; f < 240; f++) {
+    hitAudio.frame = f; ctx.time += 1 / 60;
+    const before = p.shardCount;
+    const t0 = performance.now(); p.update(hitAudio, 1 / 60, ctx); ms += performance.now() - t0;
+    if (f % 30 !== 0 && p.shardCount !== before) thrownOffHit++;
+  }
+  // The static index: block s pairs slot s-1 with slot s per particle, both edges, and the second copy repeats the first.
+  const B = p.count * 6, s = 37, pi = 1234, o = s - 1, k = s * B + pi * 6, idx = p.rbIndex;
+  check(p._rbIndexCount === p.count && idx[k] === (o * n + pi) * 2 && idx[k + 1] === (o * n + pi) * 2 + 1 && idx[k + 2] === (s * n + pi) * 2 && idx[k + 3] === (o * n + pi) * 2 + 1 && idx[k + 4] === (s * n + pi) * 2 + 1 && idx[k + 5] === (s * n + pi) * 2 && idx[k + P * B] === idx[k] && idx[P * B - 6] === ((P - 2) * n + p.count - 1) * 2, 'the static index pairs each slot with the one before it per particle, both edges, and is written twice over');
+  // The draw window: W blocks ending at the current slot, one contiguous range thanks to the doubled index.
+  const W = Math.min(P - 1, Math.ceil(secs * 60) + 1), first = (p.rbSlot - W + 1 + P) % P;
+  check(p.ribbonGeo.drawRange.start === first * B && p.ribbonGeo.drawRange.count === W * B && first + W - 1 < 2 * P && p.ribbonMat.uniforms.uNow.value === p.t, `the draw window is the last ${W} blocks ending at slot ${p.rbSlot} (${Math.round(W * B / 6 / 1000)}k quads), one range`);
+  // This frame's slot block holds the live particles on both edge vertices, with the clock as birth and a width share.
+  let live = -1; for (let j = 0; j < p.count; j++) if (p.active[j] && p.trailLen[j] > 1) { live = j; break; }
+  const v = (p.rbSlot * n + live) * 2, v3 = v * 3, v4 = v * 4;
+  check(live >= 0 && p.rbPositions[v3] === p.positions[live * 3] && p.rbPositions[v3 + 3] === p.positions[live * 3] && Math.abs(p.rbBirth[v] - p.t) < 1e-5 && p.rbBirth[v + 1] === p.rbBirth[v] && p.rbSides[v4 + 3] > 0 && p.rbSides[v4 + 7] === p.rbSides[v4 + 3] && p.rbSign[v] === -127 && p.rbSign[v + 1] === 127, 'a ribbon point is written to both edge vertices with the particle position, the clock, its width share and opposite signs');
+  const rng = p.rbPosAttr.updateRanges.at(-1);
+  check(rng.start === p.rbSlot * n * 6 && rng.count === p.count * 6 && p.rbSideAttr.updateRanges.at(-1).count === p.count * 8 && p.rbBirthAttr.updateRanges.at(-1).count === p.count * 2 && p.rbBirthAttr.updateRanges.length <= 1 + p.count, "uploads are this frame's slot block (both edges of every point) plus the caps");
+  // The three rules of the static index, read back from the ring: no alive quad bridges two lives.
+  let firsts = 0, badFirst = 0, pairs = 0, bridges = 0, orphans = 0;
+  for (let j = 0; j < p.count; j++) {
+    if (p.active[j] && p.trailLen[j] === 1) { firsts++; if (p.rbSides[(p.rbSlot * n + j) * 2 * 4 + 3] !== 0) badFirst++; }
+    for (let b = 1; b < W; b++) {
+      const sl = (first + b) % P, ol = sl === 0 ? P - 1 : sl - 1;
+      const vs = (sl * n + j) * 2, vo = (ol * n + j) * 2;
+      const as = p.t - p.rbBirth[vs] <= secs, ao = p.t - p.rbBirth[vo] <= secs;
+      if (as && ao) { pairs++; if (Math.hypot(p.rbPositions[vs * 3] - p.rbPositions[vo * 3], p.rbPositions[vs * 3 + 1] - p.rbPositions[vo * 3 + 1], p.rbPositions[vs * 3 + 2] - p.rbPositions[vo * 3 + 2]) > 0.6) bridges++; }
+      else if (as && p.rbSides[vs * 4 + 3] !== 0 && p.rbBirth[vs] - p.rbBirth[vo] > 0.05) orphans++;   // a wide point whose older neighbour is not the write before it
+    }
+  }
+  check(firsts > 0 && badFirst === 0, `the first point of a life carries a width share of 0 (${firsts} launched on this write)`);
+  check(pairs > 10000 && bridges === 0 && orphans === 0, `${pairs} alive quads in the window: none bridges two lives (${bridges} long, ${orphans} wide points without their predecessor)`);
+  check(landed >= 0 && capBirth === RIBBON_NONE, `a landed strand's newest point is blanked on sleep (particle ${landed}, slot ${capSlot})`);
+  // The frame is orthonormal at every head, turns along a strand, and the width follows speed.
+  const side = p.rbSides, nrm = p.rbNormals;
+  let offAxis = 0, turned = 0, strands = 0;
+  const bySpeed = [];
+  for (let i = 0; i < p.count; i++) {
+    if (!p.active[i] || p.trailLen[i] < 40) continue;
+    const head = (p.rbHead[i] * n + i) * 2, root = (((p.rbHead[i] + P - 30) % P) * n + i) * 2;
+    const sv = [side[head * 4] / 127, side[head * 4 + 1] / 127, side[head * 4 + 2] / 127];
+    const nv = [nrm[head * 4] / 127, nrm[head * 4 + 1] / 127, nrm[head * 4 + 2] / 127];
+    const rv = [side[root * 4] / 127, side[root * 4 + 1] / 127, side[root * 4 + 2] / 127];
+    if (Math.abs(Math.hypot(...sv) - 1) > 0.03 || Math.abs(Math.hypot(...nv) - 1) > 0.03 || Math.abs(sv[0] * nv[0] + sv[1] * nv[1] + sv[2] * nv[2]) > 0.03) offAxis++;
+    if (sv[0] * rv[0] + sv[1] * rv[1] + sv[2] * rv[2] < 0.999) turned++;
+    const i3 = i * 3;
+    bySpeed.push([Math.hypot(p.velocities[i3], p.velocities[i3 + 1], p.velocities[i3 + 2]), side[head * 4 + 3]]);
+    strands++;
+  }
+  bySpeed.sort((x, y) => x[0] - y[0]);
+  const third = Math.floor(bySpeed.length / 3);
+  const meanW = arr => arr.reduce((s, x) => s + x[1], 0) / Math.max(1, arr.length) / 127;
+  const slowW = meanW(bySpeed.slice(0, third)), fastW = meanW(bySpeed.slice(-third));
+  check(strands > 50 && offAxis === 0 && turned > strands * 0.9 && fastW > slowW * 1.15, `${strands} strands of 40+ points: side and normal unit and at right angles at the head (${offAxis} off), ${turned} turned over 30 points, the fastest third ${fastW.toFixed(2)} wide against the slowest ${slowW.toFixed(2)}`);
+  // Shards: thrown on hit frames only, scaled by the kick, flying along a unit direction with a unit side at right angles.
+  const S = look.shards, thrown = p.shardCount, sources = cores.filter(c => c.charge > 0).length;
+  check(thrown >= 8 * sources * S.perHit * 0.5 && thrown <= 8 * sources * S.perHit && thrownOffHit === 0, `${thrown} shards thrown over 8 hits from ${sources} source (perHit ${S.perHit}, scaled by the kick), none between hits`);
+  let skew = 0;
+  for (let u = 0; u < Math.min(thrown, SHARD_MAX) * 6; u++) { const u3 = u * 3, d = p.shardDirs, sd = p.shardSides; if (Math.abs(Math.hypot(d[u3], d[u3 + 1], d[u3 + 2]) - 1) > 1e-4 || Math.abs(Math.hypot(sd[u3], sd[u3 + 1], sd[u3 + 2]) - 1) > 1e-4 || Math.abs(d[u3] * sd[u3] + d[u3 + 1] * sd[u3 + 1] + d[u3 + 2] * sd[u3 + 2]) > 1e-4) skew++; }
+  const last = ((p.shardHead + SHARD_MAX - 1) % SHARD_MAX) * 6;
+  check(skew === 0 && p.shardBirth[last] > 0 && p.t - p.shardBirth[last] < 0.5 + 1e-6 && p.shardMat.uniforms.uNow.value === p.t, 'every shard flies along a unit direction with a unit side at right angles; the newest was born on the last hit');
+  console.log(`ribbons after 4 s: ${p.activeCount} in flight, ${pairs} alive quads, ${thrown} shards, ${(ms / 240).toFixed(2)} ms per particle update (links and shards included)`);
+  p.setCount(1000); p.update(hitAudio, 1 / 60, ctx);
+  check(p._rbIndexCount === 1000 && p.ribbonGeo.drawRange.count === W * 1000 * 6, 'a new count rebuilds the index once and the window follows it');
+  p.applyLook(LOOKS[0], PALETTES[0]);
+  for (const c of cores) c.applyLook(LOOKS[0], PALETTES[0]);
+  for (let f = 0; f < 2; f++) { hitAudio.frame = 1000 + f; ctx.time += 1 / 60; p.update(hitAudio, 1 / 60, ctx); }
+  check(!p.ribbonMesh.visible && p.ribbonGeo.drawRange.count === 0 && !p.shardMesh.visible && p.trailLines.visible && p.trailGeo.drawRange.count > 0 && p.pointMat.blending === THREE.AdditiveBlending && !p._ribbons && !p._shards, 'Classic hides the ribbons and the shards and draws its line trails again');
+  p.applyLook(look, PALETTES[7]);
+  check(p._rbWipe === true && p.rbBirth.every(b => b === RIBBON_NONE) && Array.from(p.trailLen).every(v => v === 0), 'coming back blanks the ring and restarts every strand');
+}
+
+// ── Paper: flat ground, flat disc planets and particles, flat ribbons in three palette colours, hairline shards, no bloom ──
+{
+  const look = LOOKS.find(l => l.name === 'Paper');
+  const cores = [mkCore(0, 1, 2, V(0, 0, 0)), mkCore(1, -0.8, 0.6, V(5, 0, 0))];
+  const p = new MagneticParticles(scene, cores, 800);
+  for (const c of cores) c.applyLook(look, PALETTES[0]);
+  p.applyLook(look, PALETTES[0]);
+  check(cores[0].uniforms.uSkin.value === 4 && p.pointMat.uniforms.uSprite.value === 3 && p.pointMat.blending === THREE.NormalBlending && p.ribbonMat.blending === THREE.NormalBlending && p.ribbonMat.uniforms.uFlat.value === 1 && p.ribbonMat.uniforms.uTaper.value === 1 && p.shardMat.blending === THREE.NormalBlending && p.shardMat.uniforms.uFlat.value === 1 && !p.linkLines.visible, 'Paper applies the paper skin, the flat sprite, normal blending on discs, ribbons and shards, flat shading and the bulge taper');
+  check(look.scene.bloom === 0 && look.scene.fog === false && look.scene.stars === false && look.scene.nebula === 'off' && look.scene.background === 'light', 'Paper runs with no bloom, no fog, no stars, no nebula, on a light ground');
+  const hitAudio = { ...audio, frame: 0, getOnset: () => hitAudio.frame % 30 === 0 };
+  const ctx = { barycenter: V(0, 0, 0), extent: 6, died: [], time: 0 };
+  for (let f = 0; f < 120; f++) { hitAudio.frame = f; ctx.time += 1 / 60; p.update(hitAudio, 1 / 60, ctx); }
+  // Every disc in flight carries a palette colour as is (the accent is a hue shift; the stub's offsetHSL is a no-op, so it equals the inner here).
+  const key = (r, g, b) => [r, g, b].map(v => Math.round(v * 255)).join(',');
+  const toRgb = h => key(((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) / 255);
+  const allowed = new Set([toRgb(PALETTES[0].rayInner), toRgb(PALETTES[0].rayOuter)]);
+  const seen = new Map(); let other = 0, ribbonOff = 0, n = 0;
+  for (let i = 0; i < p.count; i++) {
+    if (!p.active[i] || p.ages[i] < PARTICLE_TUNING.fadeIn) continue;
+    const i3 = i * 3, kp = key(p.pointColors[i3], p.pointColors[i3 + 1], p.pointColors[i3 + 2]);
+    seen.set(kp, (seen.get(kp) || 0) + 1); n++;
+    if (!allowed.has(kp)) other++;
+    const v4 = (p.rbHead[i] * p.maxCount + i) * 2 * 4, rc = p.rbColors;
+    if (!allowed.has([rc[v4], rc[v4 + 1], rc[v4 + 2]].join(','))) ribbonOff++;
+  }
+  check(n > 50 && other === 0 && ribbonOff === 0 && seen.size === 2 && Math.min(...seen.values()) > n * 0.2, `flat colours: ${n} discs in flight carry a palette colour as is (${[...seen.values()].join(' / ')} inner+accent / outer), the ribbon head the same, none lerped by level`);
+  check(p.ribbonGeo.drawRange.count > 0 && p.shardCount > 0, 'Paper draws ribbons and throws shards through the same renderer');
+  const lum = h => (0.2126 * ((h >> 16) & 255) + 0.7152 * ((h >> 8) & 255) + 0.0722 * (h & 255)) / 255;
+  const bgs = PALETTES.filter(q => !q.fromImage).map(q => lightBackground(q));
+  const sapphire = lightBackground(PALETTES[0]), mono = lightBackground(PALETTES[7]);
+  check(bgs.length === 8 && bgs.every(h => lum(h) > 0.3 && lum(h) < 0.75) && (sapphire & 255) > ((sapphire >> 16) & 255) && ((mono >> 16) & 255) === (mono & 255) && ((mono >> 8) & 255) === (mono & 255) && lightBackground({ core: 0x8899cc, bgLight: 0x0a0a3c }) === 0x0a0a3c, `a built-in palette's light ground is a mid tint of its core colour, lifted by the tone mapping on screen (Sapphire #${sapphire.toString(16)}, Monochrome #${mono.toString(16)}); an image palette keeps its own`);
+}
 // ── Palette from pixels ──
 {
   const w = 64, h = 64, data = new Uint8ClampedArray(w * h * 4);

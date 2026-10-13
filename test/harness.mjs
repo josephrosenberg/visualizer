@@ -14,7 +14,7 @@ const outPath = path.join(outDir, 'viz-under-test.mjs');
 const STUB = `
 const THREE = {
   MathUtils: { lerp: (a,b,t) => a + (b-a)*t },
-  AdditiveBlending: 2, ACESFilmicToneMapping: 1,
+  AdditiveBlending: 2, NormalBlending: 1, DoubleSide: 2, ACESFilmicToneMapping: 1,
   Vector3: class {
     constructor(x=0,y=0,z=0){this.x=x;this.y=y;this.z=z;}
     set(x,y,z){this.x=x;this.y=y;this.z=z;return this;} setScalar(s){this.x=s;this.y=s;this.z=s;return this;}
@@ -44,6 +44,6 @@ export async function load() {
     .replace(/^import .*$/mg, '')
     .replace(/const viz = new Visualizer\(\);\s*viz\.start\(\);/, '');
   fs.mkdirSync(outDir, { recursive: true });
-  fs.writeFileSync(outPath, STUB + body + '\nexport { Core, MagneticParticles, PARTICLE_TUNING, AudioAnalyzer, DemoAnalyzer, AUDIO_TUNING, Visualizer, LOOKS, MODES, makeLook, PALETTES, paletteFromPixels, PHYSICS_G, TRAIL_POINTS, RAY_COUNT, LINK_MAX_PAIRS, THREE };\n');
+  fs.writeFileSync(outPath, STUB + body + '\nexport { Core, MagneticParticles, PARTICLE_TUNING, AudioAnalyzer, DemoAnalyzer, AUDIO_TUNING, Visualizer, LOOKS, MODES, makeLook, PALETTES, paletteFromPixels, PHYSICS_G, TRAIL_POINTS, RAY_COUNT, LINK_MAX_PAIRS, RIBBON_POINTS, RIBBON_NONE, SHARD_MAX, lightBackground, THREE };\n');
   return import(pathToFileURL(outPath).href);
 }

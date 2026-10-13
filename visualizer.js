@@ -24,16 +24,23 @@ const PALETTES = [
 //
 //   planet:    { skin, visible, wireframe, landing: 'ripple' | 'spot', spotLife }
 //   particles: { sprite, size, hueScatter, countMul }
-//   trails:    { style: 'line' | 'comet' | 'hair' | 'none', seconds, opacity, drain }
+//   trails:    { style: 'line' | 'comet' | 'hair' | 'ribbon' | 'none', seconds, opacity, drain }
+//                // ribbon: the strand drawn as a flat strip by the ribbon renderer (Ribbons, Paper); dials in `ribbons`;
+//                // a landed strand always stays and fades by age (drain is implied), seconds caps at (RIBBON_POINTS - 2) / 60
 //   sim:       { charge: 'none' | 'frequency' | 'random', coulomb, separation, chargeGain,
 //                emission: 'spots' | 'even', energy, speed, trickle, poolQuiet }
 //                // energy, speed, trickle multiply PARTICLE_TUNING (1.0 = as tuned);
 //                // poolQuiet null = PARTICLE_TUNING.poolQuiet
 //   scene:     { nebula: 'auto' | 'on' | 'off', nebulaGain, bloom, fog, background: 'dark' | 'light', stars, haze }
 //                // haze 0..1 lifts the background toward the palette's outer colour (0 = as the palette says)
-//   extras:    []   // passes a look owns: 'links', 'rays' (Starburst, dials below); 'labels', 'streamlines' (later looks)
+//   extras:    []   // passes a look owns: 'links', 'rays' (Starburst), 'shards' (Ribbons, Paper), dials below; 'labels', 'streamlines' (later looks)
 //   links:     { radius, perParticle, maxPairs, opacity }   // the web between neighbouring stars, read only when extras has 'links'
 //   rays:      { count, length, spin, opacity }             // the ray fan per body, read only when extras has 'rays'
+//   ribbons:   { width, speedRef, twist, roll, taper: 'tip' | 'bulge', shade: 'lit' | 'flat', tint, accentHue }
+//                // the strip renderer, read only when trails.style is 'ribbon': width in world units at full share, speedRef the
+//                // speed at full width, twist = roll per radian of turn, roll in rad/s of the strand's own, tint 0 grey .. 1 palette,
+//                // accentHue the hue shift of the third flat colour
+//   shards:    { perHit, speed, life, length, width, opacity }   // angular slivers thrown off every source on a bass hit, read only when extras has 'shards'
 const LOOK_DEFAULTS = {
   planet:    { skin: 'nebula', visible: true, wireframe: false, landing: 'ripple', spotLife: 3.0 },
   particles: { sprite: 'disc', size: 1.0, hueScatter: 0, countMul: 1.0 },
@@ -44,6 +51,8 @@ const LOOK_DEFAULTS = {
   extras:    [],
   links:     { radius: 1.5, perParticle: 3, maxPairs: 7500, opacity: 0.35 },   // no-op: nothing reads it unless extras has 'links'
   rays:      { count: 192, length: 6.0, spin: 0.06, opacity: 0.5 },            // no-op: nothing reads it unless extras has 'rays'
+  ribbons:   { width: 0.14, speedRef: 4.0, twist: 1.0, roll: 0.5, taper: 'tip', shade: 'lit', tint: 0.35, accentHue: 0.3 },   // no-op: nothing reads it unless trails.style is 'ribbon'
+  shards:    { perHit: 6, speed: 3.5, life: 0.6, length: 0.8, width: 0.12, opacity: 0.45 },                                  // no-op: nothing reads it unless extras has 'shards'
 };
 
 function makeLook(name, overrides = {}) {
@@ -111,12 +120,48 @@ const LOOKS = [
     links:     { radius: 2.0, perParticle: 3, maxPairs: 7500, opacity: 0.35 },
     rays:      { count: 192, length: 6.0, spin: 0.06, opacity: 0.5 },
   }),
+  // Hodgin's grey ribbons: every trail a thin flat strip of tape that widens
+  // with speed, twists as its particle turns and catches a key light as it
+  // does, radiating from white-hot bodies; soft glowing dots at the heads,
+  // faint lines between neighbouring dots (the links pass) and angular
+  // slivers thrown off the bodies on a kick (the shards pass). Additive on
+  // black, colour pulled most of the way to grey so any palette reads as a
+  // tint; Monochrome is the palette of the reference frame. A landed strand
+  // stays and fades like tape settling.
+  makeLook('Ribbons', {
+    planet:    { skin: 'nebula' },
+    particles: { sprite: 'disc', size: 1.3, hueScatter: 0 },
+    trails:    { style: 'ribbon', seconds: 1.8, opacity: 0.55 },
+    ribbons:   { width: 0.14, speedRef: 4.0, twist: 1.0, roll: 0.5, taper: 'tip', shade: 'lit', tint: 0.35 },
+    sim:       { emission: 'even', energy: 1.0, speed: 1.0, trickle: 1.5, poolQuiet: 0.4 },   // full energy: the long ribbons are the tails of escapees
+    scene:     { nebula: 'off', bloom: 1.3, stars: false },
+    extras:    ['links', 'shards'],
+    links:     { radius: 1.6, perParticle: 2, maxPairs: 7500, opacity: 0.18 },
+    shards:    { perHit: 6, speed: 3.5, life: 0.6, length: 0.8, width: 0.12, opacity: 0.45 },
+  }),
+  // The 2004 Processing prototype: a flat light ground derived from the
+  // palette, no lighting, no bloom, no fog, no stars. Planets are flat discs
+  // with a drawn outline, particles flat circles of many sizes with an
+  // outline, ribbons calligraphic strokes (thin at both ends, widest
+  // mid-strand) in three flat palette colours (inner, outer and an accent
+  // hue-shifted from the inner), and a kick throws thin hairlines. Sapphire
+  // is the palette of the reference frame.
+  makeLook('Paper', {
+    planet:    { skin: 'paper' },
+    particles: { sprite: 'flat', size: 3.0, hueScatter: 0 },
+    trails:    { style: 'ribbon', seconds: 2.0, opacity: 0.92 },
+    ribbons:   { width: 0.34, speedRef: 3.0, twist: 0.6, roll: 0.4, taper: 'bulge', shade: 'flat', tint: 1.0, accentHue: 0.3 },
+    sim:       { emission: 'even', energy: 1.0, speed: 0.8, trickle: 1.2, poolQuiet: 0.4 },
+    scene:     { nebula: 'off', bloom: 0, fog: false, background: 'light', stars: false },
+    extras:    ['shards'],
+    shards:    { perHit: 4, speed: 3.0, life: 0.9, length: 1.6, width: 0.03, opacity: 0.7 },
+  }),
 ];
 const MODES = LOOKS;
 
 // Planet skins and particle sprites by name; the shaders branch on the index.
-const PLANET_SKINS = { nebula: 0, glass: 1, rings: 2, silhouette: 3 };
-const SPRITES = { disc: 0, comet: 1, star: 2 };
+const PLANET_SKINS = { nebula: 0, glass: 1, rings: 2, silhouette: 3, paper: 4 };
+const SPRITES = { disc: 0, comet: 1, star: 2, flat: 3 };
 
 // ─── Palette from an image ───────────────────────────────────────────────────
 
@@ -168,6 +213,28 @@ function paletteFromPixels(data, name = 'Image') {
   return { name, core: toHex(core), rayInner: toHex(inner), rayOuter: toHex(outer), bg: toHex(bgDark), bgLight: toHex(bgRaw), fromImage: true };
 }
 
+// The ground for a light look. An image palette carries its own (the raw
+// darkest colour); a built-in palette gets a tint of its core colour: same
+// hue, saturation capped at 0.30, lightness 0.47. That reads dull as a hex
+// because the frame still goes through the bloom pass's ACES tone mapping
+// at exposure 1.3, which lifts Sapphire's #54689a to the (101, 127, 184)
+// periwinkle of the Processing frame and Monochrome to a light grey (the
+// constants were solved by inverting Three's ACES fit). Plain integer HSL,
+// so it runs under the headless stub (whose Color has no HSL).
+function lightBackground(palette) {
+  if (palette.bgLight !== undefined) return palette.bgLight;
+  const c = palette.core;
+  const r = ((c >> 16) & 255) / 255, g = ((c >> 8) & 255) / 255, b = (c & 255) / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0, s = 0;
+  if (d > 1e-6) {
+    h = (mx === r ? ((g - b) / d + 6) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4) / 6;
+    s = Math.min(0.30, d / (1 - Math.abs(mx + mn - 1)));
+  }
+  const l = 0.47, q = l + s - l * s, p = 2 * l - q;
+  const ch = t => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 0.5 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  return (Math.round(ch(h + 1 / 3) * 255) << 16) | (Math.round(ch(h) * 255) << 8) | Math.round(ch(h - 1 / 3) * 255);
+}
 // ─── Audio Analysis ──────────────────────────────────────────────────────────
 
 // Bands are real frequencies, loudness is time-domain RMS, and every band
@@ -511,7 +578,7 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform vec3 uColorCore;
   uniform vec3 uColorInner;
   uniform vec3 uColorOuter;
-  uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass, 2 rings, 3 silhouette
+  uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass, 2 rings, 3 silhouette, 4 paper
   uniform float uSpotLife;    // seconds a landing spot (kind 2) lingers on the glass and silhouette skins
   uniform float uRadius;      // body radius, so a spot keeps its world size on a small body
   uniform vec4 uEvents[MAX_EVENTS];      // xyz: object-space direction, w: start time
@@ -662,10 +729,28 @@ const PLANET_FRAGMENT = /* glsl */ `
     return color;
   }
 
+  // Skin 4, paper (Paper): an unlit flat disc, a mid tone between the
+  // palette's outer and core colours, with a drawn outline along the limb
+  // (the outer ~8% of the projected radius, measured on the world normal so
+  // it faces the camera) in the core colour lifted toward white, and a
+  // small swell on a hit. No surface events are drawn.
+  vec3 paperSkin(float NdotV) {
+    float rp = sqrt(max(0.0, 1.0 - NdotV * NdotV));     // 0 at the disc centre, 1 at the limb
+    float edge = smoothstep(0.90, 0.94, rp);
+    float pulse = 1.0 + uBass * 0.08 + uHit * 0.15;
+    vec3 fill = mix(uColorOuter, uColorCore, 0.2) * pulse;
+    vec3 line = mix(uColorCore, vec3(1.0), 0.35);
+    return mix(fill, line, edge);
+  }
   void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(vViewDir);
     float NdotV = max(dot(N, V), 0.0);
+    if (uSkin > 3.5) {
+      vec3 Nw = normalize(vWorldNormal);
+      gl_FragColor = vec4(paperSkin(max(dot(Nw, V), 0.0)), 1.0);
+      return;
+    }
     if (uSkin > 2.5) {
       vec3 Nw = normalize(vWorldNormal);
       gl_FragColor = vec4(silhouetteSkin(max(dot(Nw, V), 0.0)), 1.0);
@@ -828,6 +913,134 @@ const RAY_FRAGMENT = /* glsl */ `
   }
 `;
 
+// ─── Ribbons (trails.style 'ribbon') ─────────────────────────────────────────
+
+// A trail drawn as a flat strip. The ribbon ring (RIBBON_POINTS slots per
+// particle, slot-major like the line ring, two vertices per point: vertex =
+// (slot * maxCount + i) * 2 + edge) keeps, per point, the position, a unit
+// side vector with the point's half-width share in w, the face normal, the
+// colour with its brightness, and the birth. All of it is written once at
+// the trail cadence into both edge vertices; a static aSign (-1 / +1) tells
+// the vertex shader which edge to push out, so the strip is expanded, shaped
+// and lit on the GPU and nothing per point is rebuilt in JS. The frame
+// (side, normal) is parallel-transported from write to write and rolled
+// about the tangent by ribbons.twist x the turn since the last write plus a
+// slow roll of the particle's own, so a strip stays flat through a gentle
+// curve, twists as its particle turns and catches the key light as it does.
+// The width share is speed (fast = wide) times the particle's size.
+//
+// The index is static, rebuilt only when the count changes: block s holds
+// the quad from slot s-1 to slot s for every particle, blocks 0..P-1 and
+// then the same again, so the window of the last W blocks ending at the
+// current slot is one contiguous draw range that slides with the ring. Three
+// rules keep that correct with nothing walked per frame: a point older than
+// the strand, never written or blanked (birth RIBBON_NONE) folds to zero
+// width in the shader; the first point of a life carries a width share of 0,
+// so a strand never joins the one its particle index left behind; and a
+// landed particle's newest point is blanked on sleep, so no quad runs from a
+// landed strand to the next life's launch point. A landed strand then stays
+// and fades by age, with no slot held. Per frame: this frame's slot block
+// (count x 2 vertices) and the caps are uploaded, the draw range moves.
+const RIBBON_VERTEX = `
+  attribute vec4 aSide;      // xyz unit side (int8), w half-width share 0..1 (0 on the first point of a life: it folds)
+  attribute vec4 aNormal;    // xyz unit face normal (int8)
+  attribute vec4 aColor;     // rgb the point's colour, a its brightness (uint8)
+  attribute float birth;     // RIBBON_NONE on a slot that holds no point of a live strand
+  attribute float aSign;     // -1 one edge, +1 the other
+  uniform float uNow;
+  uniform float uSeconds;
+  uniform float uOpacity;
+  uniform float uWidth;      // full width in world units at share 1
+  uniform float uTint;       // 0 grey, 1 the stored colour
+  uniform float uFlat;       // 0 lit, 1 flat
+  uniform float uTaper;      // 0 tip: wide at the head, thinning to the root; 1 bulge: thin at both ends, widest mid-strand
+  uniform vec3 uLight;       // key light direction, unit (the glass skin's)
+  varying vec3 vColor;
+  varying float vAlpha;
+  void main() {
+    float age = uNow - birth;
+    float alive = step(0.0, age) * step(age, uSeconds);                     // older than the strand, never written or blanked: folds
+    float fade = clamp(1.0 - age / uSeconds, 0.0, 1.0);                     // 1 at the head, 0 at the root
+    float shape = mix(sqrt(fade), 0.15 + 3.4 * fade * (1.0 - fade), uTaper);
+    float tip = min(1.0, (1.0 - fade) * 20.0);                              // the newest 5% narrows into the head dot
+    float hw = uWidth * 0.5 * aSide.w * shape * tip * alive;
+    vec3 p = position + aSide.xyz * (hw * aSign);
+    vec3 N = aNormal.xyz;
+    float nn = dot(N, N);
+    N = nn > 1.0e-6 ? N / sqrt(nn) : vec3(0.0, 1.0, 0.0);
+    vec3 V = normalize(cameraPosition - p);
+    vec3 H = normalize(uLight + V);
+    float dl = abs(dot(N, uLight));
+    float dh = abs(dot(N, H));
+    float dv = abs(dot(N, V));
+    float lit = 0.3 + 0.7 * dl + pow(dh, 32.0) * 1.4 + (1.0 - dv) * 0.15;   // two-sided diffuse, a sheen as it turns through the light, a little edge lift
+    vec3 rgb = mix(vec3(dot(aColor.rgb, vec3(0.299, 0.587, 0.114))), aColor.rgb, uTint);
+    if (uFlat > 0.5) {
+      vColor = rgb;                                                         // flat: the colour as stored, the width does the ends
+      vAlpha = uOpacity * alive;
+    } else {
+      vColor = rgb * aColor.a * lit * fade * uOpacity;                      // additive: the colour carries the intensity
+      vAlpha = 1.0;
+    }
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+  }
+`;
+const RIBBON_FRAGMENT = `
+  varying vec3 vColor;
+  varying float vAlpha;
+  void main() { gl_FragColor = vec4(vColor, vAlpha); }
+`;
+
+// ─── Shards (extras 'shards') ────────────────────────────────────────────────
+
+// Angular slivers thrown off every source on a bass hit: a pool of SHARD_MAX
+// shards, each two thin triangles sharing a root (a kinked fragment: a spike
+// with a barb off each side), six vertices carrying the origin, the unit
+// flight direction, a unit side at right angles, a corner in the shard's own
+// frame (static), a birth and a seed. The vertex shader flies it (thrown
+// hard, slowing), tumbles the side about the flight line, sizes the corner,
+// lights it by how much the face turns to the camera and fades it over its
+// life; a dead shard collapses off screen. A hit writes its shards once and
+// uploads the pool; nothing moves per frame but the clock.
+const SHARD_CORNERS = [0, 0, 0.45, 1, 1, 0,   0, 0, 1, 0, 0.3, -0.7];   // (along 0..1, across -1..1): root, barb, tip; root, tip, barb
+const SHARD_VERTEX = `
+  attribute vec3 aDir;
+  attribute vec3 aSide;
+  attribute vec2 aCorner;
+  attribute float aBirth;
+  attribute float aSeed;
+  uniform float uNow;
+  uniform float uLife;
+  uniform float uSpeed;
+  uniform float uLength;
+  uniform float uWidth;
+  uniform float uOpacity;
+  uniform float uFlat;
+  uniform vec3 uColorA;      // lit: the tip colour (the root is white-hot)
+  uniform vec3 uColorB;      // flat: the one colour
+  varying vec3 vColor;
+  varying float vAlpha;
+  void main() {
+    float age = uNow - aBirth;
+    float t = age / uLife;
+    if (age < 0.0 || t > 1.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vColor = vec3(0.0); vAlpha = 0.0; return; }
+    float travel = uSpeed * uLife * (1.0 - (1.0 - t) * (1.0 - t)) * (0.6 + 0.8 * aSeed);   // thrown hard, slowing
+    float ang = age * (3.0 + aSeed * 6.0);                                                // tumble about the flight line
+    vec3 up = cross(aDir, aSide);
+    vec3 side = aSide * cos(ang) + up * sin(ang);
+    float len = uLength * (0.5 + aSeed);
+    vec3 p = position + aDir * (travel + aCorner.x * len) + side * (aCorner.y * uWidth * (0.5 + 0.5 * aSeed));
+    vec3 N = cross(aDir, side);                                   // unit: aDir and aSide are unit and at right angles
+    vec3 V = normalize(cameraPosition - p);
+    float face = abs(dot(N, V));
+    float fall = (1.0 - t) * (1.0 - t);
+    vec3 col = mix(vec3(1.0), uColorA, aCorner.x * 0.8);
+    if (uFlat > 0.5) { vColor = uColorB; vAlpha = uOpacity * fall; }
+    else { vColor = col * (0.4 + 0.8 * face) * fall * uOpacity; vAlpha = 1.0; }
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+  }
+`;
+const SHARD_FRAGMENT = RIBBON_FRAGMENT;
 class Core {
   // params: { role, mass, charge, radius, position: Vector3, velocity: Vector3 }
   constructor(scene, index, params) {
@@ -1089,6 +1302,9 @@ class Core {
 const TRAIL_POINTS = 200;  // ring slots per particle; points are written at most 60/s, so 3.3 s at any refresh rate
 const LINK_MAX_PAIRS = 7500;   // fixed link buffer (Starburst): 5000 stars x 3 links / 2 under the A key, so the cap never binds; the look runs at the chosen count
 const LINK_MAX_DEGREE = 8;     // partners a star can list; links.perParticle is clamped to it
+const RIBBON_POINTS = 120;     // ribbon ring slots per particle (Ribbons, Paper): 2 s at the 60 Hz write cadence
+const RIBBON_NONE = -1e9;      // birth of a ribbon slot that holds no point of a live strand
+const SHARD_MAX = 512;         // pool of shards thrown on hits (extras 'shards')
 
 const PARTICLE_TUNING = {
   // Emission
@@ -1274,13 +1490,26 @@ class MagneticParticles {
         }
       `,
       fragmentShader: `
-        uniform float uSprite;   // SPRITES index: 0 disc, 1 comet, 2 star
+        uniform float uSprite;   // SPRITES index: 0 disc, 1 comet, 2 star, 3 flat
         varying vec3 vColor;
         varying vec2 vDir;
         varying float vTail;
         varying float vSpike;
         void main() {
-          if (uSprite < 0.5) {
+          if (uSprite > 2.5) {
+            // Flat (Paper): an opaque disc in the particle's flat colour with
+            // a drawn outline, lighter on a dark fill and darker on a light
+            // one, anti-aliased at the rim. Nothing glows; drawn with normal
+            // blending so a disc sits on whatever is behind it.
+            float d = length(gl_PointCoord - 0.5) * 2.0;
+            if (d > 1.0) discard;
+            float ring = smoothstep(0.70, 0.78, d);
+            float lum = dot(vColor, vec3(0.299, 0.587, 0.114));
+            vec3 line = mix(mix(vColor, vec3(1.0), 0.5), vColor * 0.5, step(0.5, lum));
+            float aa = 1.0 - smoothstep(0.94, 1.0, d);
+            gl_FragColor = vec4(mix(vColor, line, ring), aa);
+            return;
+          }          if (uSprite < 0.5) {
             float d = length(gl_PointCoord - 0.5) * 2.0;
             if (d > 1.0) discard;
             // Solid disc with a thin feathered edge and a hot center, so a
@@ -1442,6 +1671,17 @@ class MagneticParticles {
     this.linkLines.frustumCulled = false;   // the bounding sphere would be computed once, from zeros
     scene.add(this.linkLines);
 
+    // --- Ribbons (trails.style 'ribbon') and shards (extras 'shards') ---
+    // Both are built by the first look that asks (_ensureRibbons,
+    // _ensureShards), so the other looks pay nothing for them.
+    this._ribbons = null;        // the look's ribbons section while trails.style is 'ribbon'
+    this._flatColor = false;     // ribbons.shade 'flat': discs and ribbons carry one flat palette colour, not the level lerp
+    this._shards = null;         // the look's shards section while extras has 'shards'
+    this.ribbonGeo = null;
+    this.ribbonMesh = null;
+    this.shardGeo = null;
+    this.shardMesh = null;
+    this.rbSlot = 0;             // ribbon ring slot, advanced with the trail cadence under a ribbon look
     this.innerColor = new THREE.Color(0x6699ff);
     this.outerColor = new THREE.Color(0x2244aa);
     // Pooled color objects to avoid GC pressure in hot loops
@@ -1462,14 +1702,14 @@ class MagneticParticles {
   applyLook(look, palette) {
     this.look = look;
     const tr = look.trails;
-    const style = tr.style === 'none' ? 'none' : 'line';
+    const style = tr.style === 'none' ? 'none' : tr.style === 'ribbon' ? 'ribbon' : 'line';
     if (style !== this.trailStyle) this.trailLen.fill(0);
     this.trailStyle = style;
     this.trailSeconds = Math.max(0.05, tr.seconds);
     this.trailMat.uniforms.uSeconds.value = this.trailSeconds;
     this.trailMat.uniforms.uOpacity.value = tr.opacity;
     this.trailMat.uniforms.uStyle.value = tr.style === 'comet' ? 1 : tr.style === 'hair' ? 2 : 0;
-    this.trailLines.visible = style !== 'none';
+    this.trailLines.visible = style === 'line';
     // Draining strands belong to dormant particles; a look without draining
     // drops them now so they can't come back when the particle is reused.
     this._drain = tr.drain === true;
@@ -1503,6 +1743,51 @@ class MagneticParticles {
       }
     }
 
+    // Ribbons: the strip renderer over its own ring, built on first use.
+    // Coming in from a look without them every live strand restarts
+    // (trailLen is 0, so its first point folds) and the ring is blanked, so
+    // no quad can run from a strand left behind to a point written now.
+    const hadRibbons = this._ribbons !== null;
+    this._ribbons = style === 'ribbon' ? look.ribbons : null;
+    this._flatColor = this._ribbons !== null && this._ribbons.shade === 'flat';
+    if (this._ribbons) {
+      this._ensureRibbons();
+      if (!hadRibbons) { this.rbBirth.fill(RIBBON_NONE); this._rbWipe = true; }
+      const R = this._ribbons, u = this.ribbonMat.uniforms;
+      u.uSeconds.value = Math.min(this.trailSeconds, (RIBBON_POINTS - 2) / 60);
+      u.uOpacity.value = tr.opacity; u.uWidth.value = R.width; u.uTint.value = R.tint;
+      u.uFlat.value = this._flatColor ? 1 : 0; u.uTaper.value = R.taper === 'bulge' ? 1 : 0;
+      this.ribbonMat.blending = this._flatColor ? THREE.NormalBlending : THREE.AdditiveBlending;
+    } else if (this.ribbonGeo) {
+      this.ribbonGeo.setDrawRange(0, 0);
+    }
+    if (this.ribbonMesh) this.ribbonMesh.visible = this._ribbons !== null;
+    // Flat colours: inner, outer or an accent (the inner hue shifted by
+    // accentHue) per particle, picked by its hueOff so no RNG is drawn:
+    // 15% accent, 45% inner, 40% outer. Discs and shards follow the ribbons.
+    if (this._flatColor) {
+      const fc = this.ribbonColor;
+      const a = this._tmpColorA.set(this.innerColor), b = this._tmpColorB.set(this.outerColor);
+      const c = this._tmpColorParticle.set(this.innerColor).offsetHSL(this._ribbons.accentHue, 0, 0);
+      for (let i = 0; i < this.maxCount; i++) {
+        const u = (this.hueOff[i] + 1) * 0.5, i3 = i * 3;
+        const col = u < 0.15 ? c : u < 0.6 ? a : b;
+        fc[i3] = col.r; fc[i3 + 1] = col.g; fc[i3 + 2] = col.b;
+      }
+    }
+    this.pointMat.blending = this._flatColor ? THREE.NormalBlending : THREE.AdditiveBlending;
+
+    // Shards: thrown on hits while the pass is on; the pool is built on first use.
+    this._shards = look.extras.includes('shards') ? look.shards : null;
+    if (this._shards) {
+      this._ensureShards();
+      const S = this._shards, u = this.shardMat.uniforms;
+      u.uLife.value = S.life; u.uSpeed.value = S.speed; u.uLength.value = S.length; u.uWidth.value = S.width; u.uOpacity.value = S.opacity;
+      u.uFlat.value = this._flatColor ? 1 : 0;
+      u.uColorA.value.set(palette.rayInner); u.uColorB.value.set(palette.rayOuter);
+      this.shardMat.blending = this._flatColor ? THREE.NormalBlending : THREE.AdditiveBlending;
+    }
+    if (this.shardMesh) this.shardMesh.visible = this._shards !== null;
     // A new charge rule re-signs the live particles so it takes effect now.
     if (look.sim.charge !== this._chargeRule) {
       this._chargeRule = look.sim.charge;
@@ -1510,6 +1795,241 @@ class MagneticParticles {
     }
   }
 
+  // The ribbon ring, built on the first ribbon look: RIBBON_POINTS slots per
+  // particle, two vertices per point (see the Ribbons comment above the
+  // shaders for the layout, the static index and the three rules).
+  _ensureRibbons() {
+    if (this.ribbonGeo) return;
+    const n = this.maxCount, P = RIBBON_POINTS, V = P * n * 2;
+    this.rbTan = new Float32Array(n * 3);          // tangent at the last write
+    this.rbNor = new Float32Array(n * 3);          // face normal at the last write
+    this.rbHead = new Uint8Array(n);               // ring slot of each particle's newest ribbon point
+    this.ribbonColor = new Float32Array(n * 3);    // flat palette colour per particle (shade 'flat'), filled in applyLook
+    this.rbPositions = new Float32Array(V * 3);
+    this.rbSides = new Int8Array(V * 4);
+    this.rbNormals = new Int8Array(V * 4);
+    this.rbColors = new Uint8Array(V * 4);
+    this.rbBirth = new Float32Array(V).fill(RIBBON_NONE);
+    this.rbSign = new Int8Array(V);
+    for (let v = 0; v < V; v++) this.rbSign[v] = v & 1 ? 127 : -127;
+    this.rbIndex = new Uint32Array(P * n * 6 * 2);
+    const g = this.ribbonGeo = new THREE.BufferGeometry();
+    this.rbPosAttr = new THREE.BufferAttribute(this.rbPositions, 3);
+    this.rbSideAttr = new THREE.BufferAttribute(this.rbSides, 4, true);
+    this.rbNormAttr = new THREE.BufferAttribute(this.rbNormals, 4, true);
+    this.rbColAttr = new THREE.BufferAttribute(this.rbColors, 4, true);
+    this.rbBirthAttr = new THREE.BufferAttribute(this.rbBirth, 1);
+    this.rbIdxAttr = new THREE.BufferAttribute(this.rbIndex, 1);
+    g.setAttribute('position', this.rbPosAttr);
+    g.setAttribute('aSide', this.rbSideAttr);
+    g.setAttribute('aNormal', this.rbNormAttr);
+    g.setAttribute('aColor', this.rbColAttr);
+    g.setAttribute('birth', this.rbBirthAttr);
+    g.setAttribute('aSign', new THREE.BufferAttribute(this.rbSign, 1, true));
+    g.setIndex(this.rbIdxAttr);
+    g.setDrawRange(0, 0);
+    this.ribbonMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uNow: { value: 0 }, uSeconds: { value: 1.5 }, uOpacity: { value: 0.6 }, uWidth: { value: LOOK_DEFAULTS.ribbons.width },
+        uTint: { value: LOOK_DEFAULTS.ribbons.tint }, uFlat: { value: 0 }, uTaper: { value: 0 },
+        uLight: { value: new THREE.Vector3(-0.356, 0.814, 0.458) },
+      },
+      vertexShader: RIBBON_VERTEX, fragmentShader: RIBBON_FRAGMENT,
+      transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+    });
+    this.ribbonMesh = new THREE.Mesh(g, this.ribbonMat);
+    this.ribbonMesh.frustumCulled = false;   // the bounding sphere would be computed once, from zeros
+    this.ribbonMesh.renderOrder = -1;        // before the points, so a flat disc sits on its own ribbon
+    this.scene.add(this.ribbonMesh);
+    this._rbIndexCount = -1;                 // the count the static index was built for
+    this._rbWipe = false;                    // the whole birth buffer goes up on the next frame
+  }
+
+  // Static index for `count` particles: block s holds the quad from slot
+  // s-1 to slot s for every particle (6 indices each), blocks 0..P-1, then
+  // the same again, so any window of W <= P-1 blocks ending at the head is
+  // one contiguous range. Rebuilt only when the count changes.
+  _rebuildRibbonIndex() {
+    const n = this.maxCount, c = this.count, P = RIBBON_POINTS, idx = this.rbIndex;
+    let k = 0;
+    for (let rep = 0; rep < 2; rep++) {
+      for (let s = 0; s < P; s++) {
+        const o = s === 0 ? P - 1 : s - 1;
+        for (let i = 0; i < c; i++) {
+          const a = (o * n + i) * 2, b = (s * n + i) * 2;
+          idx[k++] = a; idx[k++] = a + 1; idx[k++] = b;
+          idx[k++] = a + 1; idx[k++] = b + 1; idx[k++] = b;
+        }
+      }
+    }
+    this.rbIdxAttr.clearUpdateRanges(); this.rbIdxAttr.addUpdateRange(0, k); this.rbIdxAttr.needsUpdate = true;
+    this._rbIndexCount = c;
+  }
+
+  // One ribbon point. The tangent is this write's velocity; on the first
+  // point of a life the normal is a perpendicular rolled by the particle's
+  // phase (fixed per particle, no RNG), after that it is parallel-
+  // transported from the last write (no flips at inflections) and the frame
+  // is rolled about the tangent by twist x the turn since the last write
+  // (clamped, so a bounce kinks the tape rather than spinning it) plus the
+  // strand's own slow roll. The width share is speed times size, 0 on the
+  // first point so the strand starts from nothing. Both edge vertices get
+  // the same data; aSign tells them apart.
+  _writeRibbonPoint(i, px, py, pz, vx, vy, vz, cr, cg, cb, bright, gap) {
+    const R = this._ribbons, i3 = i * 3, tan = this.rbTan, nor = this.rbNor;
+    const first = this.trailLen[i] === 0;
+    const sp = Math.sqrt(vx * vx + vy * vy + vz * vz);
+    let tx = tan[i3], ty = tan[i3 + 1], tz = tan[i3 + 2];
+    let ux = tx, uy = ty, uz = tz;
+    if (sp > 1e-4) { ux = vx / sp; uy = vy / sp; uz = vz / sp; }
+    else if (first) { ux = 0; uy = 1; uz = 0; }
+    let nx, ny, nz, turn = 0;
+    if (first) {
+      let ax = -uz, ay = 0, az = ux, al = Math.sqrt(ax * ax + az * az);
+      if (al < 1e-3) { ax = 0; ay = -uz; az = uy; al = Math.sqrt(ay * ay + az * az) || 1; }
+      ax /= al; ay /= al; az /= al;
+      const bx = uy * az - uz * ay, by = uz * ax - ux * az, bz = ux * ay - uy * ax;
+      const cp = Math.cos(this.phases[i]), sq = Math.sin(this.phases[i]);
+      nx = ax * cp + bx * sq; ny = ay * cp + by * sq; nz = az * cp + bz * sq;
+    } else {
+      turn = Math.acos(Math.max(-1, Math.min(1, ux * tx + uy * ty + uz * tz)));
+      nx = nor[i3]; ny = nor[i3 + 1]; nz = nor[i3 + 2];
+    }
+    tx = ux; ty = uy; tz = uz;
+    const d = nx * tx + ny * ty + nz * tz;
+    nx -= d * tx; ny -= d * ty; nz -= d * tz;
+    let nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (nl < 1e-4) { nx = -tz; ny = 0; nz = tx; nl = Math.sqrt(nx * nx + nz * nz); if (nl < 1e-4) { nx = 0; ny = -tz; nz = ty; nl = Math.sqrt(ny * ny + nz * nz) || 1; } }
+    nx /= nl; ny /= nl; nz /= nl;
+    let sx = ty * nz - tz * ny, sy = tz * nx - tx * nz, sz = tx * ny - ty * nx;   // side = t x n
+    const a = Math.min(turn, 1.0) * R.twist + Math.sin(this.phases[i]) * R.roll * gap;
+    if (a !== 0) {
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const rx = nx * ca + sx * sa, ry = ny * ca + sy * sa, rz = nz * ca + sz * sa;
+      sx = sx * ca - nx * sa; sy = sy * ca - ny * sa; sz = sz * ca - nz * sa;
+      nx = rx; ny = ry; nz = rz;
+    }
+    tan[i3] = tx; tan[i3 + 1] = ty; tan[i3 + 2] = tz;
+    nor[i3] = nx; nor[i3 + 1] = ny; nor[i3 + 2] = nz;
+    const share = first ? 0 : (0.3 + 0.7 * Math.min(1, sp / R.speedRef)) * (0.6 + 0.4 * this.sizeMul[i] / 1.8);
+    const sx8 = Math.round(sx * 127), sy8 = Math.round(sy * 127), sz8 = Math.round(sz * 127), w8 = Math.round(Math.min(1, share) * 127);
+    const nx8 = Math.round(nx * 127), ny8 = Math.round(ny * 127), nz8 = Math.round(nz * 127);
+    const cr8 = Math.round(Math.min(1, Math.max(0, cr)) * 255), cg8 = Math.round(Math.min(1, Math.max(0, cg)) * 255), cb8 = Math.round(Math.min(1, Math.max(0, cb)) * 255), ba8 = Math.round(Math.min(1, Math.max(0, bright)) * 255);
+    const pos = this.rbPositions, side = this.rbSides, nrm = this.rbNormals, col = this.rbColors, birth = this.rbBirth;
+    const v = (this.rbSlot * this.maxCount + i) * 2;
+    for (let e = 0; e < 2; e++) {
+      const u = v + e, u3 = u * 3, u4 = u * 4;
+      pos[u3] = px; pos[u3 + 1] = py; pos[u3 + 2] = pz;
+      side[u4] = sx8; side[u4 + 1] = sy8; side[u4 + 2] = sz8; side[u4 + 3] = w8;
+      nrm[u4] = nx8; nrm[u4 + 1] = ny8; nrm[u4 + 2] = nz8; nrm[u4 + 3] = 0;
+      col[u4] = cr8; col[u4 + 1] = cg8; col[u4 + 2] = cb8; col[u4 + 3] = ba8;
+      birth[u] = this.t;
+    }
+    this.rbHead[i] = this.rbSlot;
+  }
+
+  // A strand's newest point is blanked when its particle sleeps, so no quad
+  // can run from a landed strand to the next life's launch point. The rest
+  // of the strand stays and fades by age. One small upload range.
+  _capRibbon(i) {
+    const v = (this.rbHead[i] * this.maxCount + i) * 2;
+    this.rbBirth[v] = this.rbBirth[v + 1] = RIBBON_NONE;
+    this.rbBirthAttr.addUpdateRange(v, 2);
+  }
+
+  // Per frame under a ribbon look: rebuild the index if the count changed,
+  // upload this frame's slot block (when one was written) and the caps, or
+  // the whole birth buffer after a wipe, slide the draw window over the
+  // last W blocks, feed the clock.
+  _ribbonFrame() {
+    if (this._rbIndexCount !== this.count) this._rebuildRibbonIndex();
+    const n = this.maxCount, c = this.count, P = RIBBON_POINTS;
+    if (this._trailWrote) {
+      const v = this.rbSlot * n * 2, cnt = c * 2;
+      const up = (attr, size) => { attr.clearUpdateRanges(); attr.addUpdateRange(v * size, cnt * size); attr.needsUpdate = true; };
+      up(this.rbPosAttr, 3); up(this.rbSideAttr, 4); up(this.rbNormAttr, 4); up(this.rbColAttr, 4);
+      this.rbBirthAttr.addUpdateRange(v, cnt);           // the caps added this frame stay in the list
+    }
+    if (this._rbWipe) { this.rbBirthAttr.clearUpdateRanges(); this.rbBirthAttr.needsUpdate = true; this._rbWipe = false; }   // no ranges: the whole buffer
+    else if (this.rbBirthAttr.updateRanges.length) this.rbBirthAttr.needsUpdate = true;
+    const W = Math.min(P - 1, Math.ceil(this.ribbonMat.uniforms.uSeconds.value * 60) + 1);   // blocks in the window
+    const B = c * 6;                                                                            // indices per block
+    const first = (this.rbSlot - W + 1 + P) % P;        // oldest block drawn; the doubled index keeps the run contiguous
+    this.ribbonGeo.setDrawRange(first * B, W * B);
+    this.ribbonMat.uniforms.uNow.value = this.t;
+  }
+
+  // Shard buffers, built once on the first look whose extras name 'shards'.
+  _ensureShards() {
+    if (this.shardGeo) return;
+    const V = SHARD_MAX * 6;
+    this.shardPositions = new Float32Array(V * 3);
+    this.shardDirs = new Float32Array(V * 3);
+    this.shardSides = new Float32Array(V * 3);
+    this.shardCorners = new Float32Array(V * 2);
+    this.shardBirth = new Float32Array(V).fill(-1000);
+    this.shardSeeds = new Float32Array(V);
+    for (let s = 0; s < SHARD_MAX; s++) for (let e = 0; e < 6; e++) { const u2 = (s * 6 + e) * 2; this.shardCorners[u2] = SHARD_CORNERS[e * 2]; this.shardCorners[u2 + 1] = SHARD_CORNERS[e * 2 + 1]; }
+    const g = this.shardGeo = new THREE.BufferGeometry();
+    this.shardPosAttr = new THREE.BufferAttribute(this.shardPositions, 3);
+    this.shardDirAttr = new THREE.BufferAttribute(this.shardDirs, 3);
+    this.shardSideAttr = new THREE.BufferAttribute(this.shardSides, 3);
+    this.shardBirthAttr = new THREE.BufferAttribute(this.shardBirth, 1);
+    this.shardSeedAttr = new THREE.BufferAttribute(this.shardSeeds, 1);
+    g.setAttribute('position', this.shardPosAttr);
+    g.setAttribute('aDir', this.shardDirAttr);
+    g.setAttribute('aSide', this.shardSideAttr);
+    g.setAttribute('aCorner', new THREE.BufferAttribute(this.shardCorners, 2));
+    g.setAttribute('aBirth', this.shardBirthAttr);
+    g.setAttribute('aSeed', this.shardSeedAttr);
+    this.shardMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uNow: { value: 0 }, uLife: { value: LOOK_DEFAULTS.shards.life }, uSpeed: { value: LOOK_DEFAULTS.shards.speed }, uLength: { value: LOOK_DEFAULTS.shards.length }, uWidth: { value: LOOK_DEFAULTS.shards.width }, uOpacity: { value: LOOK_DEFAULTS.shards.opacity }, uFlat: { value: 0 },
+        uColorA: { value: new THREE.Color(0x6699ff) }, uColorB: { value: new THREE.Color(0x2244aa) },
+      },
+      vertexShader: SHARD_VERTEX, fragmentShader: SHARD_FRAGMENT,
+      transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+    });
+    this.shardMesh = new THREE.Mesh(g, this.shardMat);
+    this.shardMesh.frustumCulled = false;
+    this.scene.add(this.shardMesh);
+    this.shardHead = 0;      // next pool slot
+    this.shardCount = 0;     // shards thrown so far (tests)
+  }
+
+  // On a hit, every source throws shards from random points on its surface,
+  // more for a harder kick, into the pool's next slots. Runs only under a
+  // look whose extras name 'shards', so the other looks draw no extra RNG.
+  _throwShards() {
+    const S = this._shards;
+    const per = Math.max(1, Math.round(S.perHit * (0.5 + 0.5 * this._burstKick)));
+    const pos = this.shardPositions, dir = this.shardDirs, sid = this.shardSides, birth = this.shardBirth, seed = this.shardSeeds;
+    for (const c of this._emitters) {
+      const r = c.radius * Math.max(c.scaleT, 0.05);
+      for (let k = 0; k < per; k++) {
+        const d = this._randomDir(); const dx = d[0], dy = d[1], dz = d[2];
+        const l = this._randomLean();
+        let sx = dy * l[2] - dz * l[1], sy = dz * l[0] - dx * l[2], sz = dx * l[1] - dy * l[0];
+        let sl = Math.sqrt(sx * sx + sy * sy + sz * sz);
+        if (sl < 1e-3) { sx = -dz; sy = 0; sz = dx; sl = Math.sqrt(sx * sx + sz * sz) || 1; }
+        sx /= sl; sy /= sl; sz /= sl;
+        const sd = Math.random();
+        const ox = c.position.x + dx * r, oy = c.position.y + dy * r, oz = c.position.z + dz * r;
+        const base = this.shardHead * 6;
+        for (let e = 0; e < 6; e++) {
+          const u = base + e, u3 = u * 3;
+          pos[u3] = ox; pos[u3 + 1] = oy; pos[u3 + 2] = oz;
+          dir[u3] = dx; dir[u3 + 1] = dy; dir[u3 + 2] = dz;
+          sid[u3] = sx; sid[u3 + 1] = sy; sid[u3 + 2] = sz;
+          birth[u] = this.t; seed[u] = sd;
+        }
+        this.shardHead = (this.shardHead + 1) % SHARD_MAX;
+        this.shardCount++;
+      }
+    }
+    this.shardPosAttr.needsUpdate = true; this.shardDirAttr.needsUpdate = true; this.shardSideAttr.needsUpdate = true;
+    this.shardBirthAttr.needsUpdate = true; this.shardSeedAttr.needsUpdate = true;   // the whole pool (~130 KB), on hit frames only
+  }
   // Sign of a particle's charge under the current look: bass listeners
   // positive and treble negative, random, or none.
   _chargeSignFor(i) {
@@ -1699,6 +2219,7 @@ class MagneticParticles {
     if (this.active[i]) this.activeCount--;
     this.active[i] = 0;
     this.brightness[i] = 0;
+    if (this._ribbons && this.trailLen[i] > 0) this._capRibbon(i);   // the strand's newest point is blanked, the rest fades by age
     this.pointSizes[i] = 0;
     // Under a draining look the strand stays in the ring and fades out by
     // age from the root; otherwise it goes with the particle.
@@ -1806,7 +2327,7 @@ class MagneticParticles {
 
     // Burst budget: every bass onset, however soft (the burst size and the
     // launch energy carry the strength).
-    if (audio.getOnset('bass') && canEmit) this._flare(audio, time);
+    if (audio.getOnset('bass') && canEmit) { this._flare(audio, time); if (this._shards) this._throwShards(); }
     if (!canEmit) this.burstBudget = 0;
     const burstCap = this.count * T.burstCap;
     let burstThisFrame = 0;
@@ -1833,10 +2354,13 @@ class MagneticParticles {
     // Trail ring: advance the shared slot at most 60 times a second, so a
     // 120 Hz display gets the same trail resolution, memory and segment count
     // as a 60 Hz one.
+    const trailGap = Math.min(0.1, this.t - this._lastTrailWrite);   // seconds since the last ring write, for the ribbon roll
     const writeTrail = this.trailStyle !== 'none' && this.t - this._lastTrailWrite >= 1 / 60 - 1e-4;
     if (writeTrail) { this.trailSlot = (this.trailSlot + 1) % TRAIL_POINTS; this._lastTrailWrite = this.t; }
     this._trailWrote = writeTrail;
     const slotBase = this.trailSlot * this.maxCount;
+    // The ribbon ring advances with the same cadence; its birth upload ranges (caps, the slot block) are gathered over this frame.
+    if (this._ribbons) { if (writeTrail) this.rbSlot = (this.rbSlot + 1) % RIBBON_POINTS; this.rbBirthAttr.clearUpdateRanges(); }
 
     for (let i = 0; i < this.count; i++) {
       const i3 = i * 3;
@@ -2044,7 +2568,11 @@ class MagneticParticles {
       this.pointPositions[i3 + 2] = pz;
 
       let cr, cg, cb;
-      if (this.hueScatter > 0) {
+      if (this._flatColor) {
+        // Flat (Paper): the particle's own palette colour, as is
+        const fc = this.ribbonColor;
+        cr = fc[i3]; cg = fc[i3 + 1]; cb = fc[i3 + 2];
+      } else if (this.hueScatter > 0) {
         const hi = this.hueInner, ho = this.hueOuter;
         cr = ho[i3]     + (hi[i3]     - ho[i3])     * freqAmp;
         cg = ho[i3 + 1] + (hi[i3 + 1] - ho[i3 + 1]) * freqAmp;
@@ -2053,20 +2581,26 @@ class MagneticParticles {
         const c = this._tmpColorParticle.lerpColors(this.outerColor, this.innerColor, freqAmp);
         cr = c.r; cg = c.g; cb = c.b;
       }
-      this.pointColors[i3]     = cr * bright;
-      this.pointColors[i3 + 1] = cg * bright;
-      this.pointColors[i3 + 2] = cb * bright;
+      const gain = this._flatColor ? Math.min(1, this.ages[i] / T.fadeIn) : bright;   // flat: the colour as is once faded in; gain === bright otherwise
+      this.pointColors[i3]     = cr * gain;
+      this.pointColors[i3 + 1] = cg * gain;
+      this.pointColors[i3 + 2] = cb * gain;
 
       this.pointSizes[i] = T.pointSize * this.spriteScale * (0.6 + freqAmp * 0.8) * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]) * (0.5 + 0.5 * bright);
 
-      // Trail point for this frame
+      // Trail point for this frame: the line ring, or the ribbon ring under
+      // the ribbon style (trailLen counts for both)
       if (writeTrail) {
-        const v = slotBase + i;
-        const v3 = v * 3;
-        this.trailPositions[v3] = px; this.trailPositions[v3 + 1] = py; this.trailPositions[v3 + 2] = pz;
-        this.trailColors[v3] = cr * bright; this.trailColors[v3 + 1] = cg * bright; this.trailColors[v3 + 2] = cb * bright;
-        this.trailBirth[v] = this.t;
-        this.trailHead[i] = this.trailSlot;
+        if (this._ribbons) {
+          this._writeRibbonPoint(i, px, py, pz, vx, vy, vz, cr, cg, cb, gain, trailGap);
+        } else {
+          const v = slotBase + i;
+          const v3 = v * 3;
+          this.trailPositions[v3] = px; this.trailPositions[v3 + 1] = py; this.trailPositions[v3 + 2] = pz;
+          this.trailColors[v3] = cr * bright; this.trailColors[v3 + 1] = cg * bright; this.trailColors[v3 + 2] = cb * bright;
+          this.trailBirth[v] = this.t;
+          this.trailHead[i] = this.trailSlot;
+        }
         if (this.trailLen[i] < TRAIL_POINTS) this.trailLen[i]++;
       }
     }
@@ -2087,6 +2621,8 @@ class MagneticParticles {
     // built before the move at sepRadius and is spent).
     if (this._links) { this._buildGrid(this._links.radius); this._buildLinks(); }
 
+    if (this._ribbons) this._ribbonFrame();
+    if (this._shards) this.shardMat.uniforms.uNow.value = this.t;
     this._buildTrailIndex();
   }
 
@@ -2099,7 +2635,7 @@ class MagneticParticles {
   _buildTrailIndex() {
     const idx = this.trailIndex;
     let k = 0;
-    if (this.trailStyle !== 'none') {
+    if (this.trailStyle === 'line') {
       const n = this.maxCount, P = TRAIL_POINTS;
       for (let i = 0; i < this.count; i++) {
         const len = this.trailLen[i];
@@ -2786,7 +3322,7 @@ class Visualizer {
     const effectiveCount = Math.min(5000, Math.round(this.particleCount * look.particles.countMul));
     this.particles.setCount(effectiveCount);
 
-    const bg = (look.scene.background === 'light' && palette.bgLight !== undefined) ? palette.bgLight : palette.bg;
+    const bg = look.scene.background === 'light' ? lightBackground(palette) : palette.bg;
     this.scene.background.set(bg);
     // Haze: lift the background toward the palette's outer colour so the
     // frame is bathed in it rather than black (no-op at 0).
