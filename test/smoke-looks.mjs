@@ -14,7 +14,7 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
 {
   const sections = ['planet', 'particles', 'trails', 'sim', 'scene', 'extras'];
   const names = LOOKS.map(l => l.name);
-  check(LOOKS.length === 8 && names[0] === 'Classic' && names[7] === 'Dense', `the original eight looks are present (${names.join(', ')})`);
+  check(LOOKS.length === 9 && names[0] === 'Classic' && names[7] === 'Dense' && names[8] === 'Comets', `the original eight looks plus Comets are present (${names.join(', ')})`);
   check(LOOKS.every(l => sections.every(k => k in l)), 'every look has every section');
   const custom = makeLook('x', { trails: { seconds: 2 }, sim: { charge: 'frequency' } });
   check(custom.trails.seconds === 2 && custom.trails.style === 'line' && custom.sim.charge === 'frequency' && custom.sim.coulomb === 0 && custom.planet.skin === 'nebula', 'makeLook merges overrides over the defaults');
@@ -42,6 +42,27 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
     }
   } catch (e) { threw = e; }
   check(!threw, threw ? `looks apply: ${threw.message}` : `all ${LOOKS.length} looks apply across ${PALETTES.length} palettes and run`);
+}
+
+// ── Comets: landings register lingering spots (kind 2) in the comet's colour ──
+{
+  const look = LOOKS.find(l => l.name === 'Comets');
+  const cores = [mkCore(0, 1, 2, V(0, 0, 0)), mkCore(1, -0.8, 0.6, V(5, 0, 0))];
+  const p = new MagneticParticles(scene, cores, 500);
+  for (const c of cores) c.applyLook(look, PALETTES[0]);
+  p.applyLook(look, PALETTES[0]);
+  const hitAudio = { ...audio, frame: 0, getOnset: () => hitAudio.frame % 30 === 0 };
+  for (const c of cores) c.surfaceKinds.fill(-1);   // -1 = never written; 0 is a real kind
+  const ctx = { barycenter: V(0, 0, 0), extent: 6, died: [], time: 0 };
+  for (let f = 0; f < 360; f++) { hitAudio.frame = f; ctx.time += 1 / 60; p.update(hitAudio, 1 / 60, ctx); }
+  const kinds = cores.flatMap(c => Array.from(c.surfaceKinds));
+  check(cores[0].uniforms.uSkin.value === 1 && p.pointMat.uniforms.uSprite.value === 1 && p.trailMat.uniforms.uStyle.value === 1, 'Comets applies the glass skin, the comet sprite and the comet trail style');
+  check(kinds.includes(2) && !kinds.includes(0) && !kinds.includes(1), `Comets registers spots only: no flare rings or ripples (kinds seen: ${[...new Set(kinds)].join(',')})`);
+  const i = Array.from(cores[0].surfaceKinds).indexOf(2);
+  check(i >= 0 && cores[0].surfaceColors.slice(i * 3, i * 3 + 3).some(v => v > 0 && v < 1), 'a spot carries the comet colour, not the default white');
+  const classic = LOOKS[0];
+  for (const c of cores) c.applyLook(classic, PALETTES[0]);
+  check(cores[0].uniforms.uSkin.value === 0 && Array.from(cores[0].surfaceEvents).filter((v, k) => k % 4 === 3).every(t => t === -1000), 'switching skins clears the surface ring');
 }
 
 // ── Palette from pixels ──

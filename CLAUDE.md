@@ -32,7 +32,7 @@ No build system, no bundler, no linter. Three.js 0.162 is loaded from CDN.
 |-------|------|
 | `AudioAnalyzer` | Web Audio FFT (fftSize 2048) plus the waveform. Bands by real frequency (bass 30-200 Hz, mid 200 Hz-2 kHz, treble 2-10 kHz, laid out from `ctx.sampleRate`), loudness from time-domain RMS. Each band normalizes against its own running peak (auto-leveler, ~30 s memory: it adapts to the source's level, not to a breakdown) so any source fills 0..1. Envelopes: 20 ms attack, 200 ms release (400 ms for loudness). Per-band onsets set `getOnset(band)` for one frame and fire `getHit(band)`, which jumps to the band's level (floor 0.35) and decays over ~250 ms. `getFreqAt(hz)` gives a particle its own leveled bin. Knobs in `AUDIO_TUNING`. |
 | `DemoAnalyzer` | Synthetic 120 BPM track (kick, snare on 2 and 4, off-beat hats, 8-bar pad swell, a breakdown every fourth phrase) written into the FFT bytes and waveform, then run through the same `_analyze` as live audio. |
-| `Core` | A planet. Has a `role` (`central`, `satellite` or `partner`), `mass`, `charge`, `radius`, lifecycle (`spawning -> alive -> collapsing -> dead`), and a custom GLSL shader (hot nucleus, halo, rim, drifting value-noise atmosphere). Keeps a 32-slot ring buffer of surface events (`addSurfaceEvent`: flare spots, landings, bounces) in object space; the shader draws them as a quick flare ring or a raindrop ripple. `applyLook` sets visibility, wireframe and the skin index (`uSkin`). Physics state (`position`, `velocity`, `acceleration`) is integrated by the Visualizer, not by the Core. |
+| `Core` | A planet. Has a `role` (`central`, `satellite` or `partner`), `mass`, `charge`, `radius`, lifecycle (`spawning -> alive -> collapsing -> dead`), and a custom GLSL shader (hot nucleus, halo, rim, drifting value-noise atmosphere). Keeps a 32-slot ring buffer of surface events (`addSurfaceEvent`: kind 0 flare spot, 1 ripple, 2 landing spot with the comet's colour) in object space; the nebula skin draws kinds 0 and 1 as a quick flare ring or a raindrop ripple, the glass skin draws kind 2 as a lingering lit spot. The ring is cleared when the skin changes. `applyLook` sets visibility, wireframe and the skin index (`uSkin`). Physics state (`position`, `velocity`, `acceleration`) is integrated by the Visualizer, not by the Core. |
 | `MagneticParticles` | Up to 5000 particles thrown off source cores, mostly on bass hits. A hit grows 2-4 flare spots per source and the burst erupts from them; a low trickle runs between hits. Each particle's launch energy comes from its own frequency's level at that instant. Launches are lofted: most near-vertical, a tail down to ~25 degrees above the horizon (`launchElevMin`/`launchElevBias`), with a flare's burst leaning along the spot's jet direction. Near its source it is ballistic under the source's gravity (escape speed is the same on every body): a sub-escape launch rises as far as its speed allows, falls back, bounces once and lands; an unbound one hands over to the magnetic field once it is clear of the surface (`escapeRadii`). Escape is decided by energy, never by distance, so a lone sun gets fountains of different heights plus escapees rather than a hovering shell. Every alive core is a monopole with its `effectiveCharge`; escapees keep their momentum, feel gravity from every core for the whole flight, and are only nudged (`steer`, ~0.7 s to bend) along the summed field from positive cores to negative ones, where they land (if no positive core is alive the survivors emit outward instead). Landings and bounces register ripples on the surface. Under a look with `sim.charge` set, each particle carries a signed charge (magnitude from its live level) with Coulomb forces against the cores and grid-based separation between particles. All motion is `dt`-scaled. Knobs live in `PARTICLE_TUNING`. Rendered as a `Points` cloud plus a trail ring buffer (`TRAIL_POINTS` slots per particle, slot-major, indexed `LineSegments`, fade by age in the shader so trail length is seconds). |
 | `Nebula` | 12 procedural sprite blobs with additive blending. Off by default, toggled with B; a look can force it on or off. |
 | `Visualizer` | Main orchestrator: scene, camera, bloom post-processing, system spawning, n-body physics, core lifecycle, camera drift. |
@@ -61,14 +61,14 @@ One continuous slow drift around the system barycenter: azimuth advances ~one re
 
 A visual mode is a "look": a declarative object built with `makeLook(name, overrides)` over `LOOK_DEFAULTS`, in the `LOOKS` array (M/N cycle it). Each subsystem reads its own section in `applyLook(look, palette)`:
 
-- `planet`: `skin` (index into `PLANET_SKINS`, branches in the planet fragment shader), `visible`, `wireframe`
-- `particles`: `sprite` (index into `SPRITES`, branches in the point fragment shader), `size`, `hueScatter` (per-particle hue offset), `countMul`
-- `trails`: `style` (`line` / `none`), `seconds`, `opacity`
+- `planet`: `skin` (index into `PLANET_SKINS`: `nebula`, `glass`; branches in the planet fragment shader), `visible`, `wireframe`, `landing` (`ripple` / `spot`: what a landing registers on the surface), `spotLife`
+- `particles`: `sprite` (index into `SPRITES`: `disc`, `comet`; branches in the point shaders, comet orients by the velocity attribute), `size`, `hueScatter` (per-particle hue offset), `countMul`
+- `trails`: `style` (`line` / `comet` / `none`; comet is a cubic brightness taper with a hot tip), `seconds`, `opacity`
 - `sim`: `charge` (`none` / `frequency` / `random`), `coulomb`, `separation`, `chargeGain`
 - `scene`: `nebula` (`auto` / `on` / `off`), `bloom` multiplier, `fog`, `background` (`dark` / `light`)
 - `extras`: names of extra passes a look owns (links, labels, streamlines, rays), for later looks
 
-Unknown skin, sprite or style names fall back to today's, so a look can be added one section at a time. The original eight (Classic, Wireframe, Rays Only, Points, Long Trails, Wire Rays, Ghost, Dense) are expressed in this schema with their old values.
+Unknown skin, sprite or style names fall back to today's, so a look can be added one section at a time. The original eight (Classic, Wireframe, Rays Only, Points, Long Trails, Wire Rays, Ghost, Dense) are expressed in this schema with their old values. Comets is the ninth: glass skin, comet sprite and trail style, hue scatter 0.2, landings register lingering spots.
 
 8 colour palettes in `PALETTES`, cycled with P. "Palette from Image" on the start panel, or dropping an image anywhere, runs `paletteFromPixels` (dominant colours, assigned by brightness and saturation) and appends a palette named after the file; `bg` is dimmed near black for dark looks, `bgLight` keeps the raw colour for a light look.
 
@@ -84,7 +84,9 @@ Headless first: `node test/run.mjs` (Node 18+, no install). `test/harness.mjs` l
 - `smoke-planets.mjs`: a `Visualizer` built from its prototype (no renderer): locked spawns 1-5, lock up and down, refill, sun replacement, 60 s of physics under a lock
 - `smoke-looks.mjs`: looks schema, every look applied across every palette, `paletteFromPixels` on a synthetic image
 
-Each suite prints the numbers it measured next to PASS/FAIL, which is the fastest way to see what a tuning change did. Shaders are not covered; only the browser can tell you a GLSL change compiled.
+Each suite prints the numbers it measured next to PASS/FAIL, which is the fastest way to see what a tuning change did.
+
+Shaders and pixels: `sh test/screenshots.sh [Look ...]` (default: every look) serves the folder and drives headless Chrome with SwiftShader through `?demo&look=<name>&planets=3`, writing `test/.generated/shots/<look>.png` and the page console to `console.log`, so a GLSL compile error or a JS exception shows up without a hand on the browser, and the frames can be compared by eye. `BUDGET=20000` runs longer before the capture. URL parameters for any scripted run: `?demo` (start Demo Mode), `look=`, `palette=` (name or index), `planets=1..5`, `nebula=1`.
 
 Then in the browser:
 1. `python3 -m http.server 8080`, open localhost:8080
@@ -116,6 +118,7 @@ Then in the browser:
 - **Audio analysis**: real-frequency bands, RMS loudness, auto-leveler, musical envelopes, per-band onsets with a decaying hit, log-spaced particle listeners, a demo track with beats and a breakdown
 - **Emission and surface**: beat-driven bursts from flare spots, launch energy by frequency (bounce vs escape under source gravity), flare and ripple rings on the planet surface
 - **Looks plumbing**: declarative looks per subsystem, trail ring buffer with shader fade, signed particle charge with Coulomb and separation, palette from an image
+- **Comets look**: dark glass planets lit by lingering landing spots, oriented comet sprites, cubic-taper trails with a hot tip, hue scatter
 - **UI polish**: help overlay, keyboard shortcuts, mode/palette cycling, overlay z-index fixes
 
 ### Open work areas
@@ -130,5 +133,5 @@ Then in the browser:
    - Mid and treble hits are computed but nothing uses them yet (snare flash, hat sparkle)
    - Palette or hue could follow the spectral balance
 
-3. **New looks** (Magnetosphere 1.0 vocabulary, in this order): Comets (iTunes era: comet heads, tapered streaks, hue scatter, dark glass planets showing landings), Anemone (dark bodies, ring nucleus, long hair trails with separation), Starburst (radial rays, star sprites, silhouettes, neighbour links), Ribbons (flat Processing era, ribbon strips, light background), Attractor (the "inner logic" view: labels, orbit rings, drawn field lines)
+3. **New looks** (Magnetosphere 1.0 vocabulary, in this order): Anemone (dark bodies, ring nucleus, long hair trails with separation), Starburst (radial rays, star sprites, silhouettes, neighbour links), Ribbons (flat Processing era, ribbon strips, light background), Attractor (the "inner logic" view: labels, orbit rings, drawn field lines)
    - Each look adds its skin / sprite / extras under the schema above; shaders branch on `uSkin` / `uSprite`

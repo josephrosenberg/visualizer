@@ -22,14 +22,14 @@ const PALETTES = [
 // Unknown skins, sprites or styles fall back to the defaults, so a new look
 // can be added one section at a time. Palettes are separate (P key).
 //
-//   planet:    { skin, visible, wireframe }
+//   planet:    { skin, visible, wireframe, landing: 'ripple' | 'spot', spotLife }
 //   particles: { sprite, size, hueScatter, countMul }
-//   trails:    { style: 'line' | 'none', seconds, opacity }
+//   trails:    { style: 'line' | 'comet' | 'none', seconds, opacity }
 //   sim:       { charge: 'none' | 'frequency' | 'random', coulomb, separation, chargeGain }
 //   scene:     { nebula: 'auto' | 'on' | 'off', bloom, fog, background: 'dark' | 'light' }
 //   extras:    []   // 'links', 'labels', 'streamlines', 'rays' (later looks)
 const LOOK_DEFAULTS = {
-  planet:    { skin: 'nebula', visible: true, wireframe: false },
+  planet:    { skin: 'nebula', visible: true, wireframe: false, landing: 'ripple', spotLife: 3.0 },
   particles: { sprite: 'disc', size: 1.0, hueScatter: 0, countMul: 1.0 },
   trails:    { style: 'line', seconds: 0.5, opacity: 0.6 },
   sim:       { charge: 'none', coulomb: 0, separation: 0, chargeGain: 1.0 },
@@ -58,12 +58,21 @@ const LOOKS = [
   makeLook('Wire Rays',   { planet: { wireframe: true }, trails: { seconds: 0.42 } }),
   makeLook('Ghost',       { planet: { visible: false }, trails: { seconds: 0.83 } }),
   makeLook('Dense',       { particles: { countMul: 2.5 }, trails: { seconds: 0.83 } }),
+  // iTunes-era comets: every particle is a white-hot head with a tapered
+  // streak, hues scattered so a burst reads multi-colour, and the planets
+  // are dark glass that light up where the comets land.
+  makeLook('Comets', {
+    planet:    { skin: 'glass', landing: 'spot', spotLife: 3.0 },
+    particles: { sprite: 'comet', size: 2.2, hueScatter: 0.2, countMul: 1.3 },
+    trails:    { style: 'comet', seconds: 1.0, opacity: 0.7 },
+    scene:     { bloom: 1.25 },
+  }),
 ];
 const MODES = LOOKS;
 
 // Planet skins and particle sprites by name; the shaders branch on the index.
-const PLANET_SKINS = { nebula: 0 };
-const SPRITES = { disc: 0 };
+const PLANET_SKINS = { nebula: 0, glass: 1 };
+const SPRITES = { disc: 0, comet: 1 };
 
 // ─── Palette from an image ───────────────────────────────────────────────────
 
@@ -417,6 +426,7 @@ const HEAVY_MASS = 1.2;
 // the fragment shader as rings. Stored in object space so they rotate with
 // the body.
 const MAX_SURFACE_EVENTS = 32;
+const SPOT_MIN_GAP = 0.1;   // s between landing spots on one planet: 32 slots / 0.1 s holds 3.2 s, so a 3 s spot is rarely overwritten mid-fade
 
 const PLANET_VERTEX = /* glsl */ `
   uniform float uBass;
@@ -426,6 +436,7 @@ const PLANET_VERTEX = /* glsl */ `
   varying vec3 vWorldPos;
   varying vec3 vViewDir;
   varying vec3 vObjNormal;
+  varying vec3 vWorldNormal;
 
   void main() {
     vec3 pos = position;
@@ -433,7 +444,12 @@ const PLANET_VERTEX = /* glsl */ `
 
     vec4 worldPos = modelMatrix * vec4(pos, 1.0);
     vWorldPos = worldPos.xyz;
+    // View space. Against the world-space vViewDir this makes the nebula
+    // skin's NdotV drift with the camera, which moves its hot spot around the
+    // body; that drift is the look, so it stays. vWorldNormal is the correct
+    // one, used by the glass skin.
     vNormal = normalize(normalMatrix * normal);
+    vWorldNormal = normalize(mat3(modelMatrix) * normal);
     vViewDir = normalize(cameraPosition - worldPos.xyz);
 
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
@@ -451,14 +467,18 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform vec3 uColorCore;
   uniform vec3 uColorInner;
   uniform vec3 uColorOuter;
-  uniform float uSkin;        // PLANET_SKINS index; skins arrive with the looks that use them
+  uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass
+  uniform float uSpotLife;    // seconds a landing spot (kind 2) lingers on the glass skin
+  uniform float uRadius;      // body radius, so a spot keeps its world size on a small body
   uniform vec4 uEvents[MAX_EVENTS];      // xyz: object-space direction, w: start time
-  uniform float uEventKinds[MAX_EVENTS]; // 0 flare spot, 1 ripple
+  uniform float uEventKinds[MAX_EVENTS]; // 0 flare spot, 1 ripple, 2 landing spot
+  uniform vec3 uEventColors[MAX_EVENTS]; // kind 2: the colour of the comet that landed
 
   varying vec3 vNormal;
   varying vec3 vWorldPos;
   varying vec3 vViewDir;
   varying vec3 vObjNormal;
+  varying vec3 vWorldNormal;
 
   // Hash-based 3D value noise — cheap, good enough for atmospheric texture.
   float hash3(vec3 p) {
@@ -485,10 +505,60 @@ const PLANET_FRAGMENT = /* glsl */ `
     return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
   }
 
+  // Skin 1, dark glass (Comets): a near-black body with a Schlick fresnel
+  // rim, a thin limb line and a key-light highlight, lit by what has landed
+  // on it. A landing spot (kind 2) keeps its comet's colour: it arrives with
+  // a white flash, then glows and fades over uSpotLife. Spots are sized in
+  // world units (chord length times the radius), so a satellite shows the
+  // same dot a sun does. The look that uses this skin registers landings
+  // only, so the ring is all spots.
+  vec3 glassSkin(vec3 N, vec3 V, float NdotV) {
+    float fres  = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
+    float limb  = pow(1.0 - NdotV, 14.0);
+    float inner = pow(NdotV, 2.5);
+    vec3 L = vec3(-0.356, 0.814, 0.458);                 // fixed key light, pre-normalised
+    vec3 H = normalize(L + V);
+    float NdotH = max(dot(N, H), 0.0);
+    float spec = pow(NdotH, 120.0) * 0.5 + pow(NdotH, 10.0) * 0.05;
+    float pulse = 1.0 + uBass * 0.3 + uHit * 0.6;
+
+    vec3 color = uColorOuter * 0.03;                                    // dark glass, a hint of the palette
+    color += uColorInner * inner * 0.035 * pulse;                       // faint glow from inside
+    color += mix(uColorInner, vec3(1.0), 0.35) * fres * 0.22 * pulse;   // fresnel rim
+    color += vec3(1.0) * limb * 0.35 * pulse;                           // limb line
+    color += vec3(1.0) * spec;                                          // highlight, drifts with the camera
+
+    vec3 on = normalize(vObjNormal);
+    float lifeSpan = max(uSpotLife, 0.01);
+    for (int i = 0; i < MAX_EVENTS; i++) {
+      vec4 e = uEvents[i];
+      float age = uTime - e.w;
+      if (age < 0.0 || age > lifeSpan) continue;
+      if (uEventKinds[i] < 1.5) continue;                  // flares and ripples belong to the nebula skin
+      float c = dot(on, e.xyz);
+      if (c < 0.85) continue;                              // more than ~0.55 rad away
+      float life = age / lifeSpan;
+      float d = length(on - e.xyz) * uRadius;              // chord length, world units
+      float hot   = exp(-d * d * 900.0);                   // white-hot point, ~0.03 units
+      float haze  = exp(-d * d * 70.0);                    // coloured halo, ~0.12 units
+      float bleed = exp(-d * d * 9.0);                     // faint light into the glass, ~0.33 units
+      float fade  = (1.0 - life) * (1.0 - life) + exp(-age * 6.0) * 1.2;   // linger, plus an arrival flash
+      float win   = smoothstep(0.85, 0.95, c);             // the bleed dies before the cutoff, no seam
+      vec3 sc = uEventColors[i];
+      color += (sc * (haze * 0.9 + bleed * 0.12) + vec3(1.0) * hot * 1.2) * fade * win;
+    }
+    return color;
+  }
+
   void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(vViewDir);
     float NdotV = max(dot(N, V), 0.0);
+    if (uSkin > 0.5) {
+      vec3 Nw = normalize(vWorldNormal);
+      gl_FragColor = vec4(glassSkin(Nw, V, max(dot(Nw, V), 0.0)), 1.0);
+      return;
+    }
 
     // Hodgin-style nebula: a hot concentrated nucleus stands in stark contrast
     // to a darker body, with a soft halo just inside the silhouette.
@@ -585,6 +655,8 @@ class Core {
     for (let k = 0; k < MAX_SURFACE_EVENTS; k++) this.surfaceEvents[k * 4 + 3] = -1000;
     this.surfaceHead = 0;
     this.lastRipple = -1000;
+    this.surfaceColors = new Float32Array(MAX_SURFACE_EVENTS * 3).fill(1);
+    this.lastSpot = -1000;
     this._tmpVec = new THREE.Vector3();
     this._tmpQuat = new THREE.Quaternion();
 
@@ -603,6 +675,9 @@ class Core {
       uSkin:       { value: 0 },
       uEvents:     { value: this.surfaceEvents },
       uEventKinds: { value: this.surfaceKinds },
+      uEventColors: { value: this.surfaceColors },
+      uSpotLife:    { value: LOOK_DEFAULTS.planet.spotLife },
+      uRadius:      { value: this.radius },
     };
 
     this.material = new THREE.ShaderMaterial({
@@ -645,21 +720,28 @@ class Core {
   }
 
   // Register a surface event at world point (x, y, z): 0 = flare spot,
-  // 1 = ripple (a landing or a bounce). Ripples are throttled so a busy sink
-  // shows a patter instead of a smear.
-  addSurfaceEvent(x, y, z, kind, time) {
+  // 1 = ripple (a landing or a bounce), 2 = landing spot (the glass skin
+  // keeps it lit for spotLife in the colour r, g, b of the comet that
+  // landed). Ripples are throttled so a busy sink shows a patter instead of
+  // a smear; spots are paced to the ring so one is rarely overwritten
+  // mid-fade.
+  addSurfaceEvent(x, y, z, kind, time, r = 1, g = 1, b = 1) {
     if (kind === 1) {
       if (time - this.lastRipple < 0.03) return;
       this.lastRipple = time;
+    } else if (kind === 2) {
+      if (time - this.lastSpot < SPOT_MIN_GAP) return;
+      this.lastSpot = time;
     }
     const v = this._tmpVec.set(x - this.position.x, y - this.position.y, z - this.position.z);
     v.applyQuaternion(this._tmpQuat.copy(this.mesh.quaternion).invert()).normalize();
-    const k = this.surfaceHead * 4;
+    const k = this.surfaceHead * 4, k3 = this.surfaceHead * 3;
     this.surfaceEvents[k]     = v.x;
     this.surfaceEvents[k + 1] = v.y;
     this.surfaceEvents[k + 2] = v.z;
     this.surfaceEvents[k + 3] = time;
     this.surfaceKinds[this.surfaceHead] = kind;
+    this.surfaceColors[k3] = r; this.surfaceColors[k3 + 1] = g; this.surfaceColors[k3 + 2] = b;
     this.surfaceHead = (this.surfaceHead + 1) % MAX_SURFACE_EVENTS;
   }
 
@@ -725,7 +807,14 @@ class Core {
     const p = look.planet;
     this.mesh.visible = p.visible && this.alive;
     this.material.wireframe = p.wireframe;
-    this.uniforms.uSkin.value = PLANET_SKINS[p.skin] ?? 0;
+    const skin = PLANET_SKINS[p.skin] ?? 0;
+    if (skin !== this.uniforms.uSkin.value) {
+      // A new skin starts with a clean surface: no ripple from the old look
+      // lingers as a 3 s spot, no spot comes back as a ripple.
+      for (let k = 0; k < MAX_SURFACE_EVENTS; k++) this.surfaceEvents[k * 4 + 3] = -1000;
+    }
+    this.uniforms.uSkin.value = skin;
+    this.uniforms.uSpotLife.value = p.spotLife;
     this.uniforms.uColorCore.value.set(palette.core);
     this.uniforms.uColorInner.value.set(palette.rayInner);
     this.uniforms.uColorOuter.value.set(palette.rayOuter);
@@ -810,6 +899,8 @@ class MagneticParticles {
     this.spriteScale = 1.0;
     this.hueScatter = 0;
     this._chargeRule = 'none';
+    this._cometSprite = false;   // upload the velocity attribute each frame
+    this._spotEvents = false;    // landings register kind-2 spots instead of ripples
     this.t = 0;
     this.emitBudget = 0;     // trickle
     this.activeCount = 0;    // particles in flight
@@ -839,6 +930,8 @@ class MagneticParticles {
     this.charge = new Float32Array(n);    // signed charge this frame (0 unless the look uses charge)
     this.chargeSign = new Int8Array(n);
     this.hueOff = new Float32Array(n);    // per-particle hue offset, scaled by the look's hueScatter
+    this.hueInner = new Float32Array(n * 3); // per-particle hue-shifted palette colours, filled in applyLook
+    this.hueOuter = new Float32Array(n * 3);
     this.trailLen = new Uint16Array(n);   // trail points written since emission, capped
     this._gridHeads = new Int32Array(4096);
     this._gridNext = new Int32Array(n);
@@ -867,32 +960,75 @@ class MagneticParticles {
     this.pointGeo.setAttribute('position', new THREE.BufferAttribute(this.pointPositions, 3));
     this.pointGeo.setAttribute('color', new THREE.BufferAttribute(this.pointColors, 3));
     this.pointGeo.setAttribute('size', new THREE.BufferAttribute(this.pointSizes, 1));
+    this.pointGeo.setAttribute('velocity', new THREE.BufferAttribute(this.velocities, 3)); // comet sprites orient by it
 
     this.pointMat = new THREE.ShaderMaterial({
       uniforms: { uSprite: { value: 0 } },
       vertexShader: `
         attribute float size;
         attribute vec3 color;
+        attribute vec3 velocity;
+        uniform float uSprite;
         varying vec3 vColor;
+        varying vec2 vDir;    // comet: screen-space direction of travel in gl_PointCoord space (y down)
+        varying float vTail;  // comet: 0..1 how much tail to draw; short when moving along the view axis
         void main() {
           vColor = color;
           vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+          vec4 clip = projectionMatrix * mvPos;
           gl_PointSize = size * (250.0 / -mvPos.z);
-          gl_Position = projectionMatrix * mvPos;
+          gl_Position = clip;
+          vDir = vec2(0.0, 1.0);
+          vTail = 0.0;
+          if (uSprite > 0.5) {
+            // Where the particle will be in 1/20 s, projected, gives the tail
+            // direction on screen. x is scaled by the aspect (P[1][1] / P[0][0])
+            // so the direction is right inside the square point sprite.
+            vec4 ahead = projectionMatrix * (mvPos + modelViewMatrix * vec4(velocity * 0.05, 0.0));
+            vec2 d = ahead.xy / max(ahead.w, 0.0001) - clip.xy / max(clip.w, 0.0001);
+            d.x *= projectionMatrix[1][1] / projectionMatrix[0][0];
+            d.y = -d.y;                                                // gl_PointCoord has y down
+            float len = length(d);
+            if (len > 0.000001) vDir = d / len;
+            vTail = clamp(len * 60.0, 0.0, 1.0);
+          }
         }
       `,
       fragmentShader: `
-        uniform float uSprite;   // SPRITES index; sprites arrive with the looks that use them
+        uniform float uSprite;   // SPRITES index: 0 disc, 1 comet
         varying vec3 vColor;
+        varying vec2 vDir;
+        varying float vTail;
         void main() {
-          float d = length(gl_PointCoord - 0.5) * 2.0;
-          if (d > 1.0) discard;
-          // Solid disc with a thin feathered edge and a hot center, so a
-          // particle reads as a point of light rather than a fog blob.
-          float disc = 1.0 - smoothstep(0.6, 1.0, d);
-          float core = 1.0 - smoothstep(0.0, 0.35, d);
-          float alpha = disc * 0.85 + core * 0.6;
-          gl_FragColor = vec4(vColor * (1.0 + core * 0.6), alpha);
+          if (uSprite < 0.5) {
+            float d = length(gl_PointCoord - 0.5) * 2.0;
+            if (d > 1.0) discard;
+            // Solid disc with a thin feathered edge and a hot center, so a
+            // particle reads as a point of light rather than a fog blob.
+            float disc = 1.0 - smoothstep(0.6, 1.0, d);
+            float core = 1.0 - smoothstep(0.0, 0.35, d);
+            float alpha = disc * 0.85 + core * 0.6;
+            gl_FragColor = vec4(vColor * (1.0 + core * 0.6), alpha);
+            return;
+          }
+          // Comet: a white-hot head with a coloured glow and a tail that
+          // tapers in width and brightness behind it, against the direction
+          // of travel. The line trail carries on from the tail's tip.
+          vec2 p = (gl_PointCoord - 0.5) * 2.0;
+          float r2 = dot(p, p);
+          float along = dot(p, -vDir);                        // positive behind the head
+          float across = abs(p.x * vDir.y - p.y * vDir.x);    // distance from the travel axis
+          float head = exp(-r2 * 70.0);                       // hot point, ~0.12 of the sprite
+          float glow = exp(-r2 * 9.0);                        // soft halo
+          float tl = clamp(along / 0.95, 0.0, 1.0);           // 0 at the head, 1 at the sprite edge
+          float width = mix(0.14, 0.015, tl);                 // wide at the head, a thread at the end
+          float tail = (1.0 - tl) * (1.0 - tl)
+                     * (1.0 - smoothstep(0.0, width, across))
+                     * smoothstep(-0.08, 0.08, along) * vTail;
+          float alpha = head + glow * 0.35 + tail * 0.75;
+          if (alpha < 0.005) discard;
+          vec3 rgb = vColor * (glow * 0.5 + tail + head * 0.6) + vec3(head) * 1.2;
+          gl_FragColor = vec4(rgb, min(alpha, 1.0));
         }
       `,
       transparent: true,
@@ -927,17 +1063,26 @@ class MagneticParticles {
     this.trailGeo.setDrawRange(0, 0);
 
     this.trailMat = new THREE.ShaderMaterial({
-      uniforms: { uNow: { value: 0 }, uSeconds: { value: 0.5 }, uOpacity: { value: 0.6 } },
+      uniforms: { uNow: { value: 0 }, uSeconds: { value: 0.5 }, uOpacity: { value: 0.6 }, uStyle: { value: 0 } },
       vertexShader: `
         attribute vec3 color;
         attribute float birth;
         uniform float uNow;
         uniform float uSeconds;
         uniform float uOpacity;
+        uniform float uStyle;    // 0 linear fade (line), 1 comet: cubic taper with a hot tip
         varying vec3 vColor;
         void main() {
           float fade = clamp(1.0 - (uNow - birth) / uSeconds, 0.0, 1.0);
-          vColor = color * fade * uOpacity;
+          if (uStyle > 0.5) {
+            // Brightness falls off fast behind the head so a 1 px line reads
+            // as a streak that thins out; the newest ~11% is lifted toward
+            // white so it joins the sprite's hot head.
+            float tip = max(0.0, 1.0 - (1.0 - fade) * 9.0);
+            vColor = (color * (fade * fade * fade + tip * 0.8) + vec3(tip * 0.35)) * uOpacity;
+          } else {
+            vColor = color * fade * uOpacity;
+          }
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
@@ -976,15 +1121,30 @@ class MagneticParticles {
     this.trailSeconds = Math.max(0.05, tr.seconds);
     this.trailMat.uniforms.uSeconds.value = this.trailSeconds;
     this.trailMat.uniforms.uOpacity.value = tr.opacity;
+    this.trailMat.uniforms.uStyle.value = tr.style === 'comet' ? 1 : 0;
     this.trailLines.visible = style !== 'none';
 
     this.spriteScale = look.particles.size;
     this.hueScatter = look.particles.hueScatter;
     this.pointMat.uniforms.uSprite.value = SPRITES[look.particles.sprite] ?? 0;
+    this._cometSprite = this.pointMat.uniforms.uSprite.value === SPRITES.comet;
+    this._spotEvents = look.planet.landing === 'spot';
     this.points.visible = true;
 
     this.innerColor.set(palette.rayInner);
     this.outerColor.set(palette.rayOuter);
+    // Hue scatter is fixed per particle per look, so shift the palette once
+    // here rather than two HSL conversions per particle per frame.
+    if (this.hueScatter > 0) {
+      const a = this._tmpColorA, b = this._tmpColorB, hi = this.hueInner, ho = this.hueOuter;
+      for (let i = 0; i < this.maxCount; i++) {
+        const i3 = i * 3, h = this.hueOff[i] * this.hueScatter;
+        a.set(this.innerColor).offsetHSL(h, 0, 0);
+        b.set(this.outerColor).offsetHSL(h, 0, 0);
+        hi[i3] = a.r; hi[i3 + 1] = a.g; hi[i3 + 2] = a.b;
+        ho[i3] = b.r; ho[i3 + 1] = b.g; ho[i3 + 2] = b.b;
+      }
+    }
 
     // A new charge rule re-signs the live particles so it takes effect now.
     if (look.sim.charge !== this._chargeRule) {
@@ -1169,6 +1329,15 @@ class MagneticParticles {
     this.chargeSign[i] = this._chargeSignFor(i);
   }
 
+  // A landing on `core`: a ripple under the ring looks, a lingering spot in
+  // the particle's colour (last frame's point colour, so a loud comet leaves
+  // a bright dot and a quiet one a dim dot) under the spot looks.
+  _land(core, i, x, y, z, time) {
+    if (!this._spotEvents) { core.addSurfaceEvent(x, y, z, 1, time); return; }
+    const i3 = i * 3;
+    core.addSurfaceEvent(x, y, z, 2, time, this.pointColors[i3], this.pointColors[i3 + 1], this.pointColors[i3 + 2]);
+  }
+
   _sleep(i) {
     if (this.active[i]) this.activeCount--;
     this.active[i] = 0;
@@ -1225,7 +1394,7 @@ class MagneticParticles {
         const d = this._randomDir();
         const l = this._randomLean();
         spots.push(d[0], d[1], d[2], l[0], l[1], l[2]);
-        c.addSurfaceEvent(c.position.x + d[0] * r, c.position.y + d[1] * r, c.position.z + d[2] * r, 0, time);
+        if (!this._spotEvents) c.addSurfaceEvent(c.position.x + d[0] * r, c.position.y + d[1] * r, c.position.z + d[2] * r, 0, time);
       }
       this._spotsByCore.set(c, spots);
     }
@@ -1385,7 +1554,7 @@ class MagneticParticles {
         gx += f[0]; gy += f[1]; gz += f[2];
       }
       if (absorbedBy) {
-        absorbedBy.addSurfaceEvent(px, py, pz, 1, time);
+        this._land(absorbedBy, i, px, py, pz, time);
         this._sleep(i);
         continue;
       }
@@ -1431,9 +1600,9 @@ class MagneticParticles {
                 py = src.position.y + ny * r * 1.01;
                 pz = src.position.z + nz * r * 1.01;
                 this.bounced[i] = 1;
-                src.addSurfaceEvent(px, py, pz, 1, time);
+                if (!this._spotEvents) src.addSurfaceEvent(px, py, pz, 1, time);
               } else {
-                src.addSurfaceEvent(px, py, pz, 1, time);
+                this._land(src, i, px, py, pz, time);
                 this._sleep(i);
                 continue;
               }
@@ -1504,11 +1673,19 @@ class MagneticParticles {
       this.pointPositions[i3 + 1] = py;
       this.pointPositions[i3 + 2] = pz;
 
-      const c = this._tmpColorParticle.lerpColors(this.outerColor, this.innerColor, freqAmp);
-      if (this.hueScatter > 0) c.offsetHSL(this.hueOff[i] * this.hueScatter, 0, 0);
-      this.pointColors[i3]     = c.r * bright;
-      this.pointColors[i3 + 1] = c.g * bright;
-      this.pointColors[i3 + 2] = c.b * bright;
+      let cr, cg, cb;
+      if (this.hueScatter > 0) {
+        const hi = this.hueInner, ho = this.hueOuter;
+        cr = ho[i3]     + (hi[i3]     - ho[i3])     * freqAmp;
+        cg = ho[i3 + 1] + (hi[i3 + 1] - ho[i3 + 1]) * freqAmp;
+        cb = ho[i3 + 2] + (hi[i3 + 2] - ho[i3 + 2]) * freqAmp;
+      } else {
+        const c = this._tmpColorParticle.lerpColors(this.outerColor, this.innerColor, freqAmp);
+        cr = c.r; cg = c.g; cb = c.b;
+      }
+      this.pointColors[i3]     = cr * bright;
+      this.pointColors[i3 + 1] = cg * bright;
+      this.pointColors[i3 + 2] = cb * bright;
 
       this.pointSizes[i] = T.pointSize * this.spriteScale * (0.6 + freqAmp * 0.8) * this.sizeMul[i] * (0.8 + 0.4 * this.energy[i]) * (0.5 + 0.5 * bright);
 
@@ -1517,7 +1694,7 @@ class MagneticParticles {
         const v = slotBase + i;
         const v3 = v * 3;
         this.trailPositions[v3] = px; this.trailPositions[v3 + 1] = py; this.trailPositions[v3 + 2] = pz;
-        this.trailColors[v3] = c.r * bright; this.trailColors[v3 + 1] = c.g * bright; this.trailColors[v3 + 2] = c.b * bright;
+        this.trailColors[v3] = cr * bright; this.trailColors[v3 + 1] = cg * bright; this.trailColors[v3 + 2] = cb * bright;
         this.trailBirth[v] = this.t;
         if (this.trailLen[i] < TRAIL_POINTS) this.trailLen[i]++;
       }
@@ -1531,6 +1708,7 @@ class MagneticParticles {
     this.pointGeo.attributes.position.needsUpdate = true;
     this.pointGeo.attributes.color.needsUpdate = true;
     this.pointGeo.attributes.size.needsUpdate = true;
+    if (this._cometSprite) this.pointGeo.attributes.velocity.needsUpdate = true;
     this.pointGeo.setDrawRange(0, this.count);
 
     this._buildTrailIndex();
@@ -2311,7 +2489,35 @@ class Visualizer {
 
   start() {
     this.audio = new DemoAnalyzer();
+    this._applyUrlParams();
     this._animate();
+  }
+
+  // URL parameters for scripted runs and screenshots:
+  //   ?demo            start Demo Mode without clicking
+  //   ?look=Comets     select a look by name (or index)
+  //   ?palette=Ember   select a palette by name (or index)
+  //   ?planets=3       lock the planet count
+  //   ?nebula=1        turn the nebula on
+  _applyUrlParams() {
+    let params;
+    try { params = new URLSearchParams(window.location.search); } catch (e) { return; }
+    const byName = (list, v) => {
+      if (v === null) return -1;
+      const i = list.findIndex(x => x.name.toLowerCase() === v.toLowerCase());
+      if (i >= 0) return i;
+      const n = Number(v);
+      return Number.isInteger(n) && n >= 0 && n < list.length ? n : -1;
+    };
+    const li = byName(LOOKS, params.get('look'));
+    if (li >= 0) this.modeIndex = li;
+    const pi = byName(PALETTES, params.get('palette'));
+    if (pi >= 0) this.paletteIndex = pi;
+    const planets = Number(params.get('planets'));
+    if (Number.isInteger(planets) && planets >= 1 && planets <= 5) { this.targetBodies = planets; this._applyTargetBodies(); }
+    if (params.get('nebula') === '1') this.nebula.enabled = true;
+    if (li >= 0 || pi >= 0) this._applyLook();
+    if (params.has('demo')) this._startDemo();
   }
 
   // Single continuous slow drift around the system's barycenter. Camera
