@@ -135,24 +135,23 @@ const LOOKS = [
   // faint lines that leave the sources and bend into the sinks like a
   // magnetosphere diagram, with pulses running along them; particles as
   // short streaks along those lines; a sparse constellation web between
-  // neighbours; tiny "PARTICLE 0183" tags on a fixed subset of them and the
-  // body's role in caps beside each body. No trails: the field lines are
-  // the line work. Launches are capped so most particles stay near their
-  // body; the ring and the orbit are drawn, not simulated. Orbits,
-  // streamlines and labels are passes the look owns, named in extras and
-  // dialled in their own sections. Ember and Solar are the palettes of the
-  // reference frame.
+  // neighbours. No trails: the field lines are the line work. Launches are
+  // capped so most particles stay near their body; the ring and the orbit
+  // are drawn, not simulated. Orbits and streamlines are passes the look
+  // owns, named in extras and dialled in their own sections. The labels
+  // pass (ParticleLabels: "PARTICLE 0183" tags and the body's role in caps)
+  // exists but is off here by choice; add 'labels' to extras to see it.
+  // Ember and Solar are the palettes of the reference frame.
   makeLook('Attractor', {
     planet:      { skin: 'hot', landing: 'spot', spotLife: 1.2 },
     particles:   { sprite: 'streak', size: 2.0, hueScatter: 0.06 },
     trails:      { style: 'none' },
     sim:         { emission: 'even', energy: 0.65, speed: 0.8, trickle: 1.5, poolQuiet: 0.5 },
     scene:       { nebula: 'on', nebulaGain: 0.9, bloom: 1.15, stars: false, haze: 0.04 },
-    extras:      ['orbits', 'streamlines', 'links', 'labels'],
+    extras:      ['orbits', 'streamlines', 'links'],
     links:       { radius: 1.6, perParticle: 2, maxPairs: 7500, opacity: 0.18 },
     orbits:      { ringRadius: 1.12, dots: 160, dotSize: 1.0, spin: 0.25, circleRadius: 1.5, tilt: 0.35, precess: 0.05, opacity: 0.9, circleOpacity: 0.35 },
     streamlines: { perBody: 20, steps: 120, step: 0.12, every: 2, opacity: 0.22, flow: 1.0 },
-    labels:      { count: 48, scale: 1.0, bodyScale: 1.6, opacity: 0.8 },
   }),
   // Hodgin's grey ribbons: every trail a thin flat strip of tape that widens
   // with speed, twists as its particle turns and catches a key light as it

@@ -306,7 +306,9 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
 // ── Attractor: hot skin, streak sprite, a dot ring and circle per body, field lines from the summed field, tags on a fixed subset ──
 {
   const look = LOOKS.find(l => l.name === 'Attractor');
-  check(!!look && look.planet.skin === 'hot' && look.particles.sprite === 'streak' && look.trails.style === 'none' && look.sim.emission === 'even' && look.particles.countMul === 1 && ['orbits', 'streamlines', 'links', 'labels'].every(x => look.extras.includes(x)), 'Attractor is present: hot skin, streak sprite, no trails, even emission, the chosen count; it owns the orbits, streamlines, links and labels passes');
+  check(!!look && look.planet.skin === 'hot' && look.particles.sprite === 'streak' && look.trails.style === 'none' && look.sim.emission === 'even' && look.particles.countMul === 1 && ['orbits', 'streamlines', 'links'].every(x => look.extras.includes(x)) && !look.extras.includes('labels'), 'Attractor is present: hot skin, streak sprite, no trails, even emission, the chosen count; it owns the orbits, streamlines and links passes and leaves the labels off');
+  // The labels pass is covered through a variant of the look that names it, so it stays one word away from being switched back on.
+  const labelled = { ...look, extras: [...look.extras, 'labels'] };
   check(LOOKS.filter(l => l !== look).every(l => !['orbits', 'streamlines', 'labels'].some(x => l.extras.includes(x)) && l.planet.skin !== 'hot' && l.particles.sprite !== 'streak'), 'no other look owns the orbits, streamlines or labels passes, the hot skin or the streak sprite');
   check(LOOKS.every(l => 'orbits' in l && 'streamlines' in l && 'labels' in l), 'every look carries the orbits, streamlines and labels sections');
   const ember = PALETTES.find(pl => pl.name === 'Ember');
@@ -316,7 +318,7 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
   const fl = new FieldLines(scene, cores);
   const lb = new ParticleLabels(scene, p);
   for (const c of cores) c.applyLook(look, ember);
-  p.applyLook(look, ember); fl.applyLook(look, ember); lb.applyLook(look, ember, 2);
+  p.applyLook(look, ember); fl.applyLook(look, ember); lb.applyLook(labelled, ember, 2);
   check(cores[0].uniforms.uSkin.value === PLANET_SKINS.hot && p.pointMat.uniforms.uSprite.value === SPRITES.streak && p._cometSprite && !p.trailLines.visible && p.linkLines.visible && !cores[0].rays.visible && cores[0].orbitRing.visible && cores[0].orbitCircle.visible && fl.mesh.visible && lb.mesh.visible && lb.atlas === null, 'Attractor applies the hot skin, the streak sprite (velocity uploaded), no trails, the links, no rays, the orbits, the field lines and the labels (no atlas headless)');
   for (const c of cores) c.surfaceKinds.fill(-1);   // -1 = never written; 0 is a real kind
   const hitAudio = { ...audio, frame: 0, getOnset: () => hitAudio.frame % 30 === 0 };
