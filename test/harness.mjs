@@ -21,6 +21,7 @@ const THREE = {
     clone(){return new THREE.Vector3(this.x,this.y,this.z);} copy(v){this.x=v.x;this.y=v.y;this.z=v.z;return this;}
     sub(v){this.x-=v.x;this.y-=v.y;this.z-=v.z;return this;}
     lerp(v,t){this.x+=(v.x-this.x)*t;this.y+=(v.y-this.y)*t;this.z+=(v.z-this.z)*t;return this;}
+    lerpVectors(a,b,t){this.x=a.x+(b.x-a.x)*t;this.y=a.y+(b.y-a.y)*t;this.z=a.z+(b.z-a.z)*t;return this;}
     multiplyScalar(s){this.x*=s;this.y*=s;this.z*=s;return this;}
     length(){return Math.hypot(this.x,this.y,this.z);} normalize(){const l=this.length()||1;this.x/=l;this.y/=l;this.z/=l;return this;}
     applyQuaternion(q){const {x,y,z}=this,{x:qx,y:qy,z:qz,w:qw}=q;const ix=qw*x+qy*z-qz*y,iy=qw*y+qz*x-qx*z,iz=qw*z+qx*y-qy*x,iw=-qx*x-qy*y-qz*z;

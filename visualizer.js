@@ -563,6 +563,7 @@ const PHYSICS_G = 1.4;
 // Bodies at or above this mass count as a sun or partner; below it they're
 // satellites. Satellites are 0.4-0.8, partners 1.5+, suns 7+.
 const HEAVY_MASS = 1.2;
+const VANISH_TTL = 6;          // seconds a vanish point stays the place new bodies emerge from
 
 // ─── Core (Planet with shader-based surface) ─────────────────────────────────
 
@@ -1268,6 +1269,17 @@ class Core {
     this.scaleT = 0;
     this.collapseFrom = 1;   // scale at the start of the collapse
 
+    // The body you see is not always where physics has it. While it spawns
+    // it glides from glideFrom onto its orbital track; while it collapses it
+    // glides off the track into its sink. track holds the physics state
+    // (position, velocity) during a glide and is null the rest of the time,
+    // when position and velocity are the physics state themselves.
+    this.track = null;
+    this.glideFrom = null;    // Vector3: the point a spawning body emerges from
+    this.sink = null;         // Core: the body a collapsing one falls into
+    this.sinkPoint = null;    // Vector3: where the sink showed last, kept if it dies first
+    this.sinkChosen = false;  // the Visualizer picks a sink once, on the frame the collapse starts
+
     // Ring buffer of surface events for the shader; start times far in the
     // past so empty slots never draw.
     this.surfaceEvents = new Float32Array(MAX_SURFACE_EVENTS * 4);
@@ -1375,6 +1387,32 @@ class Core {
     this._orbitPrecess = 0;
   }
 
+  // The physics state: the track while the body glides, else the body itself.
+  get phys() {
+    return this.track || this;
+  }
+
+  // Emerge from a point. The spawn position becomes the track physics keeps
+  // integrating; the body you see starts at from and glides onto the track
+  // across the spawn phase, so a new system blooms out of one spot.
+  beginGlide(from) {
+    this.track = { position: this.position.clone(), velocity: this.velocity.clone() };
+    this.glideFrom = from.clone();
+    this.position.copy(from);
+    this.mesh.position.copy(from);
+  }
+
+  // Fall into another body while collapsing (null: shrink where it is). The
+  // Visualizer calls this once, on the frame after the collapse starts, with
+  // the heaviest body that is staying.
+  setSink(sink) {
+    this.sinkChosen = true;
+    if (!sink) return;
+    this.sink = sink;
+    this.sinkPoint = sink.position.clone();
+    if (!this.track) this.track = { position: this.position.clone(), velocity: this.velocity.clone() };
+  }
+
   // Gravitational mass used by the n-body sim. Fades linearly to zero across
   // the full collapse phase so the system's center of mass shifts smoothly
   // instead of jumping when a body finally dies.
@@ -1439,8 +1477,15 @@ class Core {
         this.phaseTime = 0;
         this.scaleT = 1;
       }
-    } else if (this.phase === 'alive') {
+    }
+    if (this.phase === 'alive') {
       this.scaleT = 1;
+      if (this.track) {   // on the track now: physics moves the body itself from here
+        this.position.copy(this.track.position);
+        this.velocity.copy(this.track.velocity);
+        this.track = null;
+        this.glideFrom = null;
+      }
       if (this.phaseTime >= this.lifeDuration) this.beginCollapse();
     } else if (this.phase === 'collapsing') {
       const t = Math.min(1, this.phaseTime / this.collapseDuration);
@@ -1453,6 +1498,24 @@ class Core {
         this.orbitRing.visible = false;
         this.orbitCircle.visible = false;
       }
+    }
+
+    // Where the body shows while physics runs on its track: gliding onto it
+    // (spawn, cubic ease-out so it leaves the point briskly and settles into
+    // orbit) or off it into the sink (collapse, ease-in so it lingers, then
+    // dives as it shrinks). The death frame lands exactly on the sink.
+    if (this.track) {
+      if (this.phase === 'spawning' && this.glideFrom) {
+        const raw = Math.min(1, this.phaseTime / this.spawnDuration);
+        this.position.lerpVectors(this.glideFrom, this.track.position, 1 - Math.pow(1 - raw, 3));
+      } else if (this.phase !== 'spawning' && this.sinkPoint) {
+        if (this.sink && this.sink.alive) this.sinkPoint.copy(this.sink.position);
+        const t = Math.min(1, this.phaseTime / this.collapseDuration);
+        this.position.lerpVectors(this.track.position, this.sinkPoint, t * t);
+      } else {
+        this.position.copy(this.track.position);
+      }
+      this.velocity.copy(this.track.velocity);
     }
 
     if (!this.alive) return;
@@ -1498,6 +1561,9 @@ class Core {
     this.collapseFrom = this.scaleT;
     this.phase = 'collapsing';
     this.phaseTime = 0;
+    // A body still gliding in dies from where it shows, not from its track.
+    if (this.track) this.track.position.copy(this.position);
+    this.glideFrom = null;
   }
 
   destroy() {
@@ -3630,6 +3696,7 @@ class Visualizer {
   // With a target count: 1 lone sun, 2 binary, 3 solar or trinary, 4-5 solar
   // with 3-4 satellites. Without one, the usual random mix.
   _spawnSystem(count = 0) {
+    const from = this._spawnOrigin();
     let type, sats;
     if (count === 1) { type = 'solar'; sats = 0; }
     else if (count === 2) { type = 'binary'; sats = 0; }
@@ -3665,7 +3732,7 @@ class Visualizer {
           (Math.random() - 0.5) * 0.02,
           (Math.random() - 0.5) * 0.05,
         ),
-      });
+      }, from);
       for (let i = 0; i < sats; i++) {
         const rad = 4.5 + i * 2.0 + Math.random() * 0.6;
         const angle = Math.random() * Math.PI * 2;
@@ -3684,7 +3751,7 @@ class Visualizer {
           radius: 0.45 + Math.random() * 0.35,
           position: pos,
           velocity: vel,
-        });
+        }, from);
       }
     } else if (type === 'binary') {
       const mass = 2.2 + Math.random() * 0.8;
@@ -3702,7 +3769,7 @@ class Visualizer {
         radius,
         position: new THREE.Vector3(-d, 0, 0),
         velocity: new THREE.Vector3(0, 0, v),
-      });
+      }, from);
       this._spawnCore({
         role: 'partner',
         mass: mass * (0.9 + Math.random() * 0.2),
@@ -3710,7 +3777,7 @@ class Visualizer {
         radius: radius * (0.9 + Math.random() * 0.2),
         position: new THREE.Vector3(d, 0, 0),
         velocity: new THREE.Vector3(0, 0, -v),
-      });
+      }, from);
       if (sats > 0) {
         const rad = sep * (1.8 + Math.random() * 0.8);
         const angle = Math.random() * Math.PI * 2;
@@ -3731,7 +3798,7 @@ class Visualizer {
             0,
             Math.cos(angle) * vOuter,
           ),
-        });
+        }, from);
       }
     } else {
       // trinary — 3 equal bodies at 120°
@@ -3753,7 +3820,7 @@ class Visualizer {
           radius: radius * (0.9 + Math.random() * 0.2),
           position: new THREE.Vector3(Math.cos(angle) * rad, 0, Math.sin(angle) * rad),
           velocity: new THREE.Vector3(-Math.sin(angle) * v, 0, Math.cos(angle) * v),
-        });
+        }, from);
       }
     }
   }
@@ -3769,13 +3836,17 @@ class Visualizer {
   _addBody() {
     const live = this._liveCores();
     if (live.length === 0) { this._spawnSystem(this.targetBodies); return; }
+    const from = this._spawnOrigin();
 
+    // Everything here is sized on the tracks (where physics has the bodies),
+    // not on where gliding ones show.
     let M = 0, cx = 0, cy = 0, cz = 0, vx = 0, vy = 0, vz = 0;
     let heavy = live[0];
     for (const c of live) {
+      const P = c.phys;
       M += c.mass;
-      cx += c.position.x * c.mass; cy += c.position.y * c.mass; cz += c.position.z * c.mass;
-      vx += c.velocity.x * c.mass; vy += c.velocity.y * c.mass; vz += c.velocity.z * c.mass;
+      cx += P.position.x * c.mass; cy += P.position.y * c.mass; cz += P.position.z * c.mass;
+      vx += P.velocity.x * c.mass; vy += P.velocity.y * c.mass; vz += P.velocity.z * c.mass;
       if (c.mass > heavy.mass) heavy = c;
     }
     cx /= M; cy /= M; cz /= M; vx /= M; vy /= M; vz /= M;
@@ -3789,28 +3860,30 @@ class Visualizer {
         radius: 1.9 + Math.random() * 0.4,
         position: new THREE.Vector3(cx, cy, cz),
         velocity: new THREE.Vector3(vx, vy, vz),
-      });
+      }, from);
       // The survivors have been coasting without a sun; put each back on a
       // circular orbit around the new one at its current distance, keeping
       // its current direction of travel.
       for (const c of live) {
-        const rx = c.position.x - cx, ry = c.position.y - cy, rz = c.position.z - cz;
+        const P = c.phys;
+        const rx = P.position.x - cx, ry = P.position.y - cy, rz = P.position.z - cz;
         const d = Math.hypot(rx, ry, rz) || 1;
         const ux = rx / d, uy = ry / d, uz = rz / d;
-        let tx = c.velocity.x - vx, ty = c.velocity.y - vy, tz = c.velocity.z - vz;
+        let tx = P.velocity.x - vx, ty = P.velocity.y - vy, tz = P.velocity.z - vz;
         const radial = tx * ux + ty * uy + tz * uz;
         tx -= radial * ux; ty -= radial * uy; tz -= radial * uz;
         let tl = Math.hypot(tx, ty, tz);
         if (tl < 1e-3) { tx = -uz; ty = 0; tz = ux; tl = Math.hypot(tx, ty, tz) || 1; }
         const vc = Math.sqrt(PHYSICS_G * heavyMass / d) * 1.05;
-        c.velocity.set(vx + tx / tl * vc, vy + ty / tl * vc, vz + tz / tl * vc);
+        P.velocity.set(vx + tx / tl * vc, vy + ty / tl * vc, vz + tz / tl * vc);
       }
       return;
     }
 
     let maxR = 0;
     for (const c of live) {
-      const d = Math.hypot(c.position.x - cx, c.position.y - cy, c.position.z - cz) + c.radius;
+      const P = c.phys;
+      const d = Math.hypot(P.position.x - cx, P.position.y - cy, P.position.z - cz) + c.radius;
       if (d > maxR) maxR = d;
     }
     const ELLIP = 1.05;
@@ -3829,18 +3902,40 @@ class Visualizer {
         cz + Math.sin(angle) * rad,
       ),
       velocity: new THREE.Vector3(vx - Math.sin(angle) * v, vy, vz + Math.cos(angle) * v),
-    });
+    }, from);
   }
 
   // Collapse the lightest, outermost bodies first so the sun goes last.
+  // Their sinks are picked on the next lifecycle pass, like any collapse.
   _removeBodies(n) {
     const live = this._liveCores();
     let cx = 0, cy = 0, cz = 0;
-    for (const c of live) { cx += c.position.x; cy += c.position.y; cz += c.position.z; }
+    for (const c of live) { cx += c.phys.position.x; cy += c.phys.position.y; cz += c.phys.position.z; }
     cx /= live.length; cy /= live.length; cz /= live.length;
-    const dist = c => Math.hypot(c.position.x - cx, c.position.y - cy, c.position.z - cz);
+    const dist = c => Math.hypot(c.phys.position.x - cx, c.phys.position.y - cy, c.phys.position.z - cz);
     live.sort((a, b) => (a.mass - b.mass) || (dist(b) - dist(a)));
     for (let i = 0; i < n && i < live.length; i++) live[i].beginCollapse();
+  }
+
+  // Bodies phase in and out of one point. New ones emerge from the heaviest
+  // body there is (a count going up, a locked count refilling: the dead one
+  // sank into that body), else from where the last body vanished if that was
+  // moments ago (a system being replaced), else from the origin (the first).
+  _spawnOrigin() {
+    let heavy = null;
+    for (const c of this._liveCores()) if (!heavy || c.mass > heavy.mass) heavy = c;
+    if (heavy) return heavy.position.clone();
+    if (this._vanish) return this._vanish.p.clone();
+    return new THREE.Vector3();
+  }
+
+  // The body a collapsing one falls into: the heaviest that is staying. None
+  // when it is the last, so it shrinks where it is and that becomes the
+  // point the next system emerges from.
+  _sinkFor(core) {
+    let best = null;
+    for (const c of this._liveCores()) if (c !== core && (!best || c.mass > best.mass)) best = c;
+    return best;
   }
 
   // Keys 1-5: settle the running system toward the new count right away.
@@ -3851,8 +3946,9 @@ class Visualizer {
     this.spawnCooldown = 1.5;
   }
 
-  _spawnCore(params) {
+  _spawnCore(params, from = null) {
     const core = new Core(this.scene, this.coreIdCounter++, params);
+    if (from) core.beginGlide(from);
     this.cores.push(core);
     this._applyModeToCore(core);
     return core;
@@ -3880,13 +3976,18 @@ class Visualizer {
     // Forces (mass-based gravitational attraction between all cores).
     // Uses effectiveMass so a collapsing body's pull fades smoothly toward
     // zero across its collapse phase — no instantaneous COM jump on death.
+    // Everything below runs on each body's physics state (core.phys): the
+    // track while it glides in or out, the body itself otherwise. A glide is
+    // presentation only, so the orbits are what they would be without it.
     for (const core of physicsCores) {
+      const P = core.phys;
       core.acceleration.set(0, 0, 0);
       for (const other of physicsCores) {
         if (other === core) continue;
-        const dx = other.position.x - core.position.x;
-        const dy = other.position.y - core.position.y;
-        const dz = other.position.z - core.position.z;
+        const O = other.phys;
+        const dx = O.position.x - P.position.x;
+        const dy = O.position.y - P.position.y;
+        const dz = O.position.z - P.position.z;
         const distSq = dx * dx + dy * dy + dz * dz + softening * softening;
         const dist = Math.sqrt(distSq);
         const fMag = G * other.effectiveMass / distSq;
@@ -3898,13 +3999,14 @@ class Visualizer {
 
     // Symplectic Euler integration
     for (const core of physicsCores) {
-      core.velocity.x += core.acceleration.x * dt;
-      core.velocity.y += core.acceleration.y * dt;
-      core.velocity.z += core.acceleration.z * dt;
-      core.velocity.multiplyScalar(damping);
-      core.position.x += core.velocity.x * dt;
-      core.position.y += core.velocity.y * dt;
-      core.position.z += core.velocity.z * dt;
+      const P = core.phys;
+      P.velocity.x += core.acceleration.x * dt;
+      P.velocity.y += core.acceleration.y * dt;
+      P.velocity.z += core.acceleration.z * dt;
+      P.velocity.multiplyScalar(damping);
+      P.position.x += P.velocity.x * dt;
+      P.position.y += P.velocity.y * dt;
+      P.position.z += P.velocity.z * dt;
     }
 
     // Pull the center of mass gradually back to origin (~95% of the offset
@@ -3916,39 +4018,51 @@ class Visualizer {
     let vx = 0, vy = 0, vz = 0;
     let totalMass = 0;
     for (const core of physicsCores) {
+      const P = core.phys;
       const m = core.effectiveMass;
-      cx += core.position.x * m;
-      cy += core.position.y * m;
-      cz += core.position.z * m;
-      vx += core.velocity.x * m;
-      vy += core.velocity.y * m;
-      vz += core.velocity.z * m;
+      cx += P.position.x * m;
+      cy += P.position.y * m;
+      cz += P.position.z * m;
+      vx += P.velocity.x * m;
+      vy += P.velocity.y * m;
+      vz += P.velocity.z * m;
       totalMass += m;
     }
     if (totalMass > 0.0001) {
       cx /= totalMass; cy /= totalMass; cz /= totalMass;
       vx /= totalMass; vy /= totalMass; vz /= totalMass;
       const recenterFrac = 1 - Math.pow(0.05, dt); // ~95%/s
+      const sx = cx * recenterFrac, sy = cy * recenterFrac, sz = cz * recenterFrac;
       for (const core of physicsCores) {
-        core.position.x -= cx * recenterFrac;
-        core.position.y -= cy * recenterFrac;
-        core.position.z -= cz * recenterFrac;
-        core.velocity.x -= vx * recenterFrac;
-        core.velocity.y -= vy * recenterFrac;
-        core.velocity.z -= vz * recenterFrac;
+        const P = core.phys;
+        P.position.x -= sx; P.position.y -= sy; P.position.z -= sz;
+        P.velocity.x -= vx * recenterFrac;
+        P.velocity.y -= vy * recenterFrac;
+        P.velocity.z -= vz * recenterFrac;
+        // The fixed points a glide runs between move with the system.
+        if (core.glideFrom) { core.glideFrom.x -= sx; core.glideFrom.y -= sy; core.glideFrom.z -= sz; }
+        if (core.sinkPoint) { core.sinkPoint.x -= sx; core.sinkPoint.y -= sy; core.sinkPoint.z -= sz; }
       }
+      if (this._vanish) { this._vanish.p.x -= sx; this._vanish.p.y -= sy; this._vanish.p.z -= sz; }
     }
   }
 
   _updateCoreLifecycles(dt) {
     this.spawnCooldown = Math.max(0, this.spawnCooldown - dt);
+    if (this._vanish && (this._vanish.ttl -= dt) <= 0) this._vanish = null;
 
     for (let i = this.cores.length - 1; i >= 0; i--) {
       if (!this.cores[i].alive && this.cores[i].phase === 'dead') {
+        // Where it vanished is where the next bodies emerge from, for a while.
+        this._vanish = { p: this.cores[i].position.clone(), ttl: VANISH_TTL };
         this.cores[i].destroy();
         this.cores.splice(i, 1);
       }
     }
+
+    // A collapse that began since the last pass (age, a key, a trim) gets its
+    // sink now: the heaviest body that is staying, or none for the last one.
+    for (const c of this.cores) if (c.phase === 'collapsing' && !c.sinkChosen) c.setSink(this._sinkFor(c));
 
     if (this.targetBodies > 0) {
       // Keep the locked count: bodies still age and die, the system refills.
