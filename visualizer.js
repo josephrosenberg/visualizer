@@ -22,7 +22,9 @@ const PALETTES = [
 // Unknown skins, sprites or styles fall back to the defaults, so a new look
 // can be added one section at a time. Palettes are separate (P key).
 //
-//   planet:    { skin, visible, wireframe, landing: 'ripple' | 'spot', spotLife }
+//   planet:    { skin, visible, wireframe, landing: 'ripple' | 'spot', spotLife, swell, ripple, glow }
+//                // swell / ripple / glow: how much the rings skin lives on the bass (nucleus breathing, a ring per kick
+//                // across the dark body, the body warming); 0 = still, read only by the 'rings' skin
 //   particles: { sprite, size, hueScatter, countMul }
 //   trails:    { style: 'line' | 'comet' | 'hair' | 'ribbon' | 'none', seconds, opacity, drain }
 //                // ribbon: the strand drawn as a flat strip by the ribbon renderer (Ribbons, Paper); dials in `ribbons`;
@@ -48,7 +50,7 @@ const PALETTES = [
 //                // accentHue the hue shift of the third flat colour
 //   shards:    { perHit, speed, life, length, width, opacity }   // angular slivers thrown off every source on a bass hit, read only when extras has 'shards'
 const LOOK_DEFAULTS = {
-  planet:    { skin: 'nebula', visible: true, wireframe: false, landing: 'ripple', spotLife: 3.0 },
+  planet:    { skin: 'nebula', visible: true, wireframe: false, landing: 'ripple', spotLife: 3.0, swell: 0, ripple: 0, glow: 0 },
   particles: { sprite: 'disc', size: 1.0, hueScatter: 0, countMul: 1.0 },
   trails:    { style: 'line', seconds: 0.5, opacity: 0.6, drain: false },
   sim:       { charge: 'none', coulomb: 0, separation: 0, chargeGain: 1.0,
@@ -100,9 +102,11 @@ const LOOKS = [
   // capped low (fountains and slow escapes, no comets), bursts erupt from the
   // whole surface, separation fans the strands, every strand ends in a small
   // bright dot and drains into the body when it lands, and the nebula fills
-  // the frame. Aurora is the palette of the reference frame.
+  // the frame. The nucleus lives on the bass (swell, ripple, glow: 1 is the
+  // tuned amount, 0 the still nucleus). Aurora is the palette of the
+  // reference frame.
   makeLook('Anemone', {
-    planet:    { skin: 'rings' },
+    planet:    { skin: 'rings', swell: 1.0, ripple: 1.0, glow: 1.0 },
     particles: { sprite: 'disc', size: 0.6, hueScatter: 0.08 },
     trails:    { style: 'hair', seconds: 3.0, opacity: 0.3, drain: true },
     sim:       { charge: 'random', coulomb: 0, separation: 1.0, emission: 'even', energy: 0.6, speed: 0.5, trickle: 2.5, poolQuiet: 0.5 },
@@ -615,6 +619,9 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform float uSkin;        // PLANET_SKINS index: 0 nebula, 1 glass, 2 rings, 3 silhouette, 4 paper, 5 hot
   uniform float uSpotLife;    // seconds a landing spot (kind 2) lingers on the glass and silhouette skins
   uniform float uRadius;      // body radius, so a spot keeps its world size on a small body
+  uniform vec3 uRingGain;     // rings skin: planet.swell, planet.ripple, planet.glow
+  uniform float uKick;        // seconds since the last bass onset (large when none yet)
+  uniform float uKickPeak;    // how hard that onset landed, 0..1
   uniform vec4 uEvents[MAX_EVENTS];      // xyz: object-space direction, w: start time
   uniform float uEventKinds[MAX_EVENTS]; // 0 flare spot, 1 ripple, 2 landing spot
   uniform vec3 uEventColors[MAX_EVENTS]; // kind 2: the colour of the comet that landed
@@ -703,6 +710,18 @@ const PLANET_FRAGMENT = /* glsl */ `
   // concentric on any body and never spin with the mesh. The rest of the
   // body is a silhouette against the hair and the nebula. Surface events
   // are not drawn: hair lands without a mark.
+  //
+  // The nucleus lives on the bass. Brightness alone does not show (the core
+  // is clipped to white under bloom), so the motion is in size and place:
+  // the white-hot centre and its glow swell with the level and jump on a
+  // hit, the bright ring moves out with them so the dark gap breathes
+  // (swell); each kick sends one thin ring out of the nucleus across the
+  // dark body to the limb over 0.7 s, fading as it goes, on the body's own
+  // kick clock (ripple; uKick is seconds since the onset, uKickPeak how
+  // hard it landed); and the body warms with the level, a faint glow
+  // spreading from the nucleus and a brighter rim (glow). Each is a dial on
+  // the look's planet section, 0 = still, and with all three at 0 this is
+  // the still nucleus exactly.
   float ringBand(float x, float centre, float sharp) {
     float d = (x - centre) * sharp;
     return exp(-d * d);
@@ -710,17 +729,24 @@ const PLANET_FRAGMENT = /* glsl */ `
   vec3 ringSkin(float NdotV) {
     float rp = sqrt(max(0.0, 1.0 - NdotV * NdotV));      // 0 at the disc centre, 1 at the limb
     float pulse = 1.0 + uBass * 0.4 + uHit * 0.8;
-    float hot   = exp(-rp * rp * 600.0);                   // white-hot centre, ~4% of the radius
-    float core  = exp(-rp * rp * 90.0);                    // palette glow around it, ~10%
-    float ring1 = ringBand(rp, 0.15, 30.0);                // bright ring where the glow ends
+    float swell = 1.0 + (uBass * 0.35 + uHit * 0.6) * uRingGain.x;   // radius multiplier of the white-hot centre
+    float s2    = swell * swell;
+    float hot   = exp(-rp * rp * 600.0 / s2);                              // white-hot centre, ~4% of the radius at rest
+    float core  = exp(-rp * rp * 90.0 / (1.0 + (s2 - 1.0) * 0.6));         // palette glow around it, ~10%; swells less than the point
+    float r1    = 0.15 * (1.0 + (swell - 1.0) * 0.5);                      // the bright ring moves out with the glow
+    float ring1 = ringBand(rp, r1, 30.0);                  // bright ring where the glow ends
     float ring2 = ringBand(rp, 0.30, 45.0) * 0.18;         // faint ring past the dark gap
     float ring3 = ringBand(rp, 0.42, 55.0) * 0.08;         // fainter still
-    float limb  = pow(max(0.0, 1.0 - NdotV), 12.0) * 0.06; // the faintest edge, so the silhouette has a rim
+    float limb  = pow(max(0.0, 1.0 - NdotV), 12.0) * 0.06 * (1.0 + uBass * 2.0 * uRingGain.z); // the faintest edge, warmer with the bass
+    float ph    = clamp(uKick / 0.7, 0.0, 1.0);                                                 // the kick's ring: born on ring1, at the limb at 1
+    float ripple = ringBand(rp, r1 + ph * (1.0 - r1), 40.0) * (1.0 - ph) * (1.0 - ph) * uKickPeak * 0.9 * uRingGain.y;
     vec3 color = uColorOuter * 0.02;                                   // near-black body
+    color += uColorInner * exp(-rp * rp * 2.5) * (0.012 + uBass * 0.05) * uRingGain.z;   // the body warms with the level
     color += vec3(1.0) * hot * 3.0 * pulse;
     color += mix(uColorInner, vec3(1.0), 0.4) * core * 1.2 * pulse;
     color += uColorInner * ring1 * 1.5 * pulse;
     color += uColorInner * (ring2 + ring3) * pulse;
+    color += uColorInner * ripple;
     color += uColorInner * limb;
     return color;
   }
@@ -1289,6 +1315,8 @@ class Core {
     this.lastRipple = -1000;
     this.surfaceColors = new Float32Array(MAX_SURFACE_EVENTS * 3).fill(1);
     this.lastSpot = -1000;
+    this._kickAge = 1000;    // seconds since the last bass onset this body saw
+    this._kickPeak = 0;      // how hard it landed (the hit on that frame)
     this._tmpVec = new THREE.Vector3();
     this._tmpQuat = new THREE.Quaternion();
 
@@ -1310,6 +1338,9 @@ class Core {
       uEventColors: { value: this.surfaceColors },
       uSpotLife:    { value: LOOK_DEFAULTS.planet.spotLife },
       uRadius:      { value: this.radius },
+      uRingGain:    { value: new THREE.Vector3(0, 0, 0) },
+      uKick:        { value: 1000 },
+      uKickPeak:    { value: 0 },
     };
 
     this.material = new THREE.ShaderMaterial({
@@ -1533,6 +1564,12 @@ class Core {
     this.uniforms.uMid.value = audio.getMid();
     this.uniforms.uTreble.value = audio.getTreble();
     this.uniforms.uHit.value = hit;
+    // The kick clock, for skins that animate a beat slower than the hit's
+    // 90 ms decay (the rings skin's ripple): age of the last bass onset and
+    // how hard it landed.
+    if (audio.getOnset('bass')) { this._kickAge = 0; this._kickPeak = hit; } else this._kickAge += dt;
+    this.uniforms.uKick.value = this._kickAge;
+    this.uniforms.uKickPeak.value = this._kickPeak;
 
     if (this.rays.visible) {
       this.rays.position.copy(this.position);
@@ -1590,6 +1627,7 @@ class Core {
     }
     this.uniforms.uSkin.value = skin;
     this.uniforms.uSpotLife.value = p.spotLife;
+    this.uniforms.uRingGain.value.set(p.swell, p.ripple, p.glow);
     this.uniforms.uColorCore.value.set(palette.core);
     this.uniforms.uColorInner.value.set(palette.rayInner);
     this.uniforms.uColorOuter.value.set(palette.rayOuter);

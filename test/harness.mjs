@@ -45,6 +45,6 @@ export async function load() {
     .replace(/^import .*$/mg, '')
     .replace(/const viz = new Visualizer\(\);\s*viz\.start\(\);/, '');
   fs.mkdirSync(outDir, { recursive: true });
-  fs.writeFileSync(outPath, STUB + body + '\nexport { Core, MagneticParticles, PARTICLE_TUNING, AudioAnalyzer, DemoAnalyzer, AUDIO_TUNING, Visualizer, LOOKS, MODES, makeLook, PALETTES, paletteFromPixels, PHYSICS_G, TRAIL_POINTS, RAY_COUNT, LINK_MAX_PAIRS, PLANET_SKINS, SPRITES, FieldLines, ParticleLabels, ORBIT_DOTS, STREAM_MAX_LINES, LABEL_MAX_PARTICLES, LABEL_STRIDE, LABEL_WORDS, RIBBON_POINTS, RIBBON_NONE, SHARD_MAX, lightBackground, THREE };\n');
+  fs.writeFileSync(outPath, STUB + body + '\nexport { Core, MagneticParticles, PARTICLE_TUNING, AudioAnalyzer, DemoAnalyzer, AUDIO_TUNING, Visualizer, LOOKS, LOOK_DEFAULTS, MODES, makeLook, PALETTES, paletteFromPixels, PHYSICS_G, TRAIL_POINTS, RAY_COUNT, LINK_MAX_PAIRS, PLANET_SKINS, SPRITES, FieldLines, ParticleLabels, ORBIT_DOTS, STREAM_MAX_LINES, LABEL_MAX_PARTICLES, LABEL_STRIDE, LABEL_WORDS, RIBBON_POINTS, RIBBON_NONE, SHARD_MAX, lightBackground, THREE };\n');
   return import(pathToFileURL(outPath).href);
 }

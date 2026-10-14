@@ -1,7 +1,7 @@
 // Looks schema and application, and the palette-from-image picker.
 // Run: node test/smoke-looks.mjs   (or node test/run.mjs for all)
 import { load } from './harness.mjs';
-const { Core, MagneticParticles, PARTICLE_TUNING, LOOKS, makeLook, PALETTES, paletteFromPixels, RAY_COUNT, LINK_MAX_PAIRS, PLANET_SKINS, SPRITES, FieldLines, ParticleLabels, ORBIT_DOTS, STREAM_MAX_LINES, LABEL_MAX_PARTICLES, LABEL_STRIDE, LABEL_WORDS, RIBBON_POINTS, RIBBON_NONE, SHARD_MAX, lightBackground, THREE } = await load();
+const { Core, MagneticParticles, PARTICLE_TUNING, LOOKS, LOOK_DEFAULTS, makeLook, PALETTES, paletteFromPixels, RAY_COUNT, LINK_MAX_PAIRS, PLANET_SKINS, SPRITES, FieldLines, ParticleLabels, ORBIT_DOTS, STREAM_MAX_LINES, LABEL_MAX_PARTICLES, LABEL_STRIDE, LABEL_WORDS, RIBBON_POINTS, RIBBON_NONE, SHARD_MAX, lightBackground, THREE } = await load();
 
 let failures = 0;
 const check = (ok, msg) => { console.log((ok ? 'PASS ' : 'FAIL ') + msg); if (!ok) failures++; };
@@ -82,6 +82,16 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
   for (const c of cores) c.applyLook(look, PALETTES[0]);
   p.applyLook(look, PALETTES[0]);
   check(cores[0].uniforms.uSkin.value === 2 && p.trailMat.uniforms.uStyle.value === 2 && p.pointMat.uniforms.uSprite.value === 0, 'Anemone applies the ring skin, the hair trail style and the disc sprite');
+  {
+    const g = cores[0].uniforms.uRingGain.value;
+    check(g.x === look.planet.swell && g.y === look.planet.ripple && g.z === look.planet.glow && g.x > 0 && g.y > 0 && g.z > 0 && LOOK_DEFAULTS.planet.swell === 0 && LOOK_DEFAULTS.planet.ripple === 0 && LOOK_DEFAULTS.planet.glow === 0, 'the nucleus dials (swell, ripple, glow) reach the skin as uRingGain; the defaults keep every other look still');
+    // The kick clock: a bass onset resets it to zero with the hit as its peak, then it ages by dt until the next one.
+    const kick = { ...audio, frame: 0, getOnset: () => kick.frame % 30 === 0, getHit: () => (kick.frame % 30 === 0 ? 0.8 : 0) };
+    const c = cores[0], u = c.uniforms, seen = [];
+    for (let f = 0; f < 45; f++) { kick.frame = f; c.update(f / 60, 1 / 60, kick); if (f === 0 || f === 29 || f === 30 || f === 44) seen.push([u.uKick.value, u.uKickPeak.value]); }
+    const peak = 0.8 * (0.35 + 0.65 * 0.5);
+    check(seen[0][0] === 0 && Math.abs(seen[0][1] - peak) < 1e-9 && Math.abs(seen[1][0] - 29 / 60) < 1e-9 && seen[2][0] === 0 && Math.abs(seen[3][0] - 14 / 60) < 1e-9 && Math.abs(seen[3][1] - peak) < 1e-9, 'the kick clock resets on each bass onset with the hit as its peak and ages by dt between');
+  }
   const hitAudio = { ...audio, frame: 0, getOnset: () => hitAudio.frame % 30 === 0 };
   const ctx = { barycenter: V(0, 0, 0), extent: 6, died: [], time: 0 };
   for (let f = 0; f < 120; f++) { hitAudio.frame = f; ctx.time += 1 / 60; p.update(hitAudio, 1 / 60, ctx); }
