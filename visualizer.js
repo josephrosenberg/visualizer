@@ -33,7 +33,7 @@ const PALETTES = [
 //                // poolQuiet null = PARTICLE_TUNING.poolQuiet
 //   scene:     { nebula: 'auto' | 'on' | 'off', nebulaGain, bloom, fog, background: 'dark' | 'light', stars, haze }
 //                // haze 0..1 lifts the background toward the palette's outer colour (0 = as the palette says)
-//   extras:    []   // passes a look owns: 'links', 'rays' (Starburst), 'shards' (Ribbons, Paper), dials below; 'orbits', 'streamlines', 'labels' (Attractor, dials below)
+//   extras:    []   // passes a look owns: 'links', 'rays' (Starburst), 'shards' (Ribbons, Paper), dials below; 'orbits', 'streamlines' (Attractor, dials below); 'labels' (the tag pass, dials below, no look names it today)
 //   links:     { radius, perParticle, maxPairs, opacity }   // the web between neighbouring stars, read only when extras has 'links'
 //   rays:      { count, length, spin, opacity }             // the ray fan per body, read only when extras has 'rays'
 //   orbits:    { ringRadius, dots, dotSize, spin, circleRadius, tilt, precess, opacity, circleOpacity }
