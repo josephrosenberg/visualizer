@@ -66,6 +66,10 @@ const mkCore = (i, charge, radius, pos) => { const c = new Core(scene, i, { role
   for (let f = 0; f < 360; f++) { hitAudio.frame = f; ctx.time += 1 / 60; p.update(hitAudio, 1 / 60, ctx); }
   const kinds = cores.flatMap(c => Array.from(c.surfaceKinds));
   check(cores[0].uniforms.uSkin.value === 1 && p.pointMat.uniforms.uSprite.value === 1 && p.trailMat.uniforms.uStyle.value === 1, 'Comets applies the glass skin, the comet sprite and the comet trail style');
+  {
+    const g = cores[0].uniforms.uGlassGain.value;
+    check(g.x === look.planet.cloud && g.y === look.planet.fringe && g.z === look.planet.ember && g.x > 0 && g.y > 0 && g.z > 0 && LOOK_DEFAULTS.planet.cloud === 0 && LOOK_DEFAULTS.planet.fringe === 0 && LOOK_DEFAULTS.planet.ember === 0, 'the smoke dials (cloud, fringe, ember) reach the skin as uGlassGain; the defaults keep the shiny glass for any other look');
+  }
   check(kinds.includes(2) && !kinds.includes(0) && !kinds.includes(1), `Comets registers spots only: no flare rings or ripples (kinds seen: ${[...new Set(kinds)].join(',')})`);
   const i = Array.from(cores[0].surfaceKinds).indexOf(2);
   check(i >= 0 && cores[0].surfaceColors.slice(i * 3, i * 3 + 3).some(v => v > 0 && v < 1), 'a spot carries the comet colour, not the default white');

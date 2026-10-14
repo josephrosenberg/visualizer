@@ -25,6 +25,9 @@ const PALETTES = [
 //   planet:    { skin, visible, wireframe, landing: 'ripple' | 'spot', spotLife, swell, ripple, glow }
 //                // swell / ripple / glow: how much the rings skin lives on the bass (nucleus breathing, a ring per kick
 //                // across the dark body, the body warming); 0 = still, read only by the 'rings' skin
+//                // cloud / fringe / ember: how far the glass skin is smoke instead of shiny glass (drifting wisps on a dark
+//                // ground with an eroded limb, a cloudy palette fringe, slow inner glows); 0 = the glass, cloud above 1 strengthens
+//                // the wisps, read only by 'glass'
 //   particles: { sprite, size, hueScatter, countMul }
 //   trails:    { style: 'line' | 'comet' | 'hair' | 'ribbon' | 'none', seconds, opacity, drain }
 //                // ribbon: the strand drawn as a flat strip by the ribbon renderer (Ribbons, Paper); dials in `ribbons`;
@@ -50,7 +53,7 @@ const PALETTES = [
 //                // accentHue the hue shift of the third flat colour
 //   shards:    { perHit, speed, life, length, width, opacity }   // angular slivers thrown off every source on a bass hit, read only when extras has 'shards'
 const LOOK_DEFAULTS = {
-  planet:    { skin: 'nebula', visible: true, wireframe: false, landing: 'ripple', spotLife: 3.0, swell: 0, ripple: 0, glow: 0 },
+  planet:    { skin: 'nebula', visible: true, wireframe: false, landing: 'ripple', spotLife: 3.0, swell: 0, ripple: 0, glow: 0, cloud: 0, fringe: 0, ember: 0 },
   particles: { sprite: 'disc', size: 1.0, hueScatter: 0, countMul: 1.0 },
   trails:    { style: 'line', seconds: 0.5, opacity: 0.6, drain: false },
   sim:       { charge: 'none', coulomb: 0, separation: 0, chargeGain: 1.0,
@@ -89,9 +92,11 @@ const LOOKS = [
   makeLook('Dense',       { particles: { countMul: 2.5 }, trails: { seconds: 0.83 } }),
   // iTunes-era comets: every particle is a white-hot head with a tapered
   // streak, hues scattered so a burst reads multi-colour, and the planets
-  // are dark glass that light up where the comets land.
+  // are dark smoke-wrapped bodies that light up where the comets land
+  // (cloud, fringe, ember: 1 is the smoke as built, 0 the shiny glass it
+  // replaced).
   makeLook('Comets', {
-    planet:    { skin: 'glass', landing: 'spot', spotLife: 3.0 },
+    planet:    { skin: 'glass', landing: 'spot', spotLife: 3.0, cloud: 1.0, fringe: 1.0, ember: 1.0 },
     particles: { sprite: 'comet', size: 2.2, hueScatter: 0.2 },
     trails:    { style: 'comet', seconds: 1.0, opacity: 0.7 },
     scene:     { bloom: 1.25 },
@@ -620,6 +625,7 @@ const PLANET_FRAGMENT = /* glsl */ `
   uniform float uSpotLife;    // seconds a landing spot (kind 2) lingers on the glass and silhouette skins
   uniform float uRadius;      // body radius, so a spot keeps its world size on a small body
   uniform vec3 uRingGain;     // rings skin: planet.swell, planet.ripple, planet.glow
+  uniform vec3 uGlassGain;    // glass skin: planet.cloud, planet.fringe, planet.ember
   uniform float uKick;        // seconds since the last bass onset (large when none yet)
   uniform float uKickPeak;    // how hard that onset landed, 0..1
   uniform vec4 uEvents[MAX_EVENTS];      // xyz: object-space direction, w: start time
@@ -657,13 +663,26 @@ const PLANET_FRAGMENT = /* glsl */ `
     return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
   }
 
-  // Skin 1, dark glass (Comets): a near-black body with a Schlick fresnel
-  // rim, a thin limb line and a key-light highlight, lit by what has landed
+  // Skin 1, dark glass (Comets): a near-black body lit by what has landed
   // on it. A landing spot (kind 2) keeps its comet's colour: it arrives with
   // a white flash, then glows and fades over uSpotLife. Spots are sized in
   // world units (chord length times the radius), so a satellite shows the
   // same dot a sun does. The look that uses this skin registers landings
   // only, so the ring is all spots.
+  //
+  // The body comes in two states mixed by planet.cloud. At 0 it is the
+  // shiny glass: a Schlick fresnel rim, a thin limb line and a key-light
+  // highlight. At 1 it is smoke: two octaves of value noise drifting over
+  // the body in world space (so the wisps slide as the body spins and the
+  // camera tours) make sparse brighter wisps on a dark ground, the key
+  // light is a soft twilight instead of a highlight, the outer tenth of the
+  // disc darkens to nothing, and the last few percent of the limb erode on
+  // the noise (fragments discarded, so what is behind shows through a
+  // ragged edge; the mesh stays opaque elsewhere). planet.fringe adds a
+  // cloudy palette glow over the outer half, ragged by the same noise;
+  // planet.ember adds slow inner glows in the brightest wisps, each on its
+  // own phase. The wisps gain contrast with the bass, the fringe swells
+  // with it, and the treble glimmers in the wisps.
   vec3 glassSkin(vec3 N, vec3 V, float NdotV) {
     float fres  = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
     float limb  = pow(1.0 - NdotV, 14.0);
@@ -674,11 +693,39 @@ const PLANET_FRAGMENT = /* glsl */ `
     float spec = pow(NdotH, 120.0) * 0.5 + pow(NdotH, 10.0) * 0.05;
     float pulse = 1.0 + uBass * 0.3 + uHit * 0.6;
 
-    vec3 color = uColorOuter * 0.03;                                    // dark glass, a hint of the palette
-    color += uColorInner * inner * 0.035 * pulse;                       // faint glow from inside
-    color += mix(uColorInner, vec3(1.0), 0.35) * fres * 0.22 * pulse;   // fresnel rim
-    color += vec3(1.0) * limb * 0.35 * pulse;                           // limb line
-    color += vec3(1.0) * spec;                                          // highlight, drifts with the camera
+    vec3 glass = uColorOuter * 0.03;                                    // dark glass, a hint of the palette
+    glass += uColorInner * inner * 0.035 * pulse;                       // faint glow from inside
+    glass += mix(uColorInner, vec3(1.0), 0.35) * fres * 0.22 * pulse;   // fresnel rim
+    glass += vec3(1.0) * limb * 0.35 * pulse;                           // limb line
+    glass += vec3(1.0) * spec;                                          // highlight, drifts with the camera
+
+    vec3 color = glass;
+    float cloudAmt = min(uGlassGain.x, 1.0);               // the glass-to-smoke mix; above 1 the dial strengthens the wisps
+    if (uGlassGain.x > 0.0) {
+      vec3 p = vWorldPos * 0.8;
+      float t = uTime * 0.06;
+      float n1 = vnoise(p + vec3(t, -t * 0.7, 0.0));
+      float n2 = vnoise(p * 2.7 + vec3(0.0, t * 1.1, t * 0.5));
+      float n  = n1 * 0.65 + n2 * 0.35;
+      float rp = sqrt(max(0.0, 1.0 - NdotV * NdotV));     // 0 at the disc centre, 1 at the limb
+      // The limb erodes: past 94% of the radius, the deeper in the band, the
+      // more of the body is gone, and where the noise is low it goes first.
+      float band = (rp - 0.94) / 0.06;
+      if (band > n2 * 1.1 - 0.05) discard;
+
+      float wisp     = smoothstep(0.3, 0.9, n);                                  // sparse brighter wisps on a dark ground
+      float twilight = max(dot(N, L), 0.0);                                      // a soft day side, no highlight
+      float edge     = 1.0 - smoothstep(0.88, 1.0, rp) * 0.75;                   // the outer tenth darkens toward nothing
+      float fringe   = smoothstep(0.5, 1.0, rp) * (0.35 + 0.65 * n2);            // the cloudy atmosphere, ragged by the noise
+      float ember    = pow(max(0.0, n - 0.55) / 0.45, 2.0)                       // the brightest wisps only
+                     * (0.5 + 0.5 * sin(uTime * 0.5 + n1 * 12.0));                // each on its own slow phase
+      vec3 smoke = mix(uColorOuter, uColorCore, wisp) * (0.03 + wisp * (0.10 + uBass * 0.06) * uGlassGain.x + twilight * 0.03);
+      smoke += mix(uColorInner, vec3(1.0), 0.5) * wisp * uTreble * 0.06;         // treble glimmer in the wisps
+      smoke += uColorInner * fringe * fringe * (0.16 + uBass * 0.12) * pulse * uGlassGain.y;
+      smoke += uColorInner * ember * 0.18 * pulse * uGlassGain.z;
+      smoke *= edge;
+      color = mix(glass, smoke, cloudAmt);
+    }
 
     vec3 on = normalize(vObjNormal);
     float lifeSpan = max(uSpotLife, 0.01);
@@ -1339,6 +1386,7 @@ class Core {
       uSpotLife:    { value: LOOK_DEFAULTS.planet.spotLife },
       uRadius:      { value: this.radius },
       uRingGain:    { value: new THREE.Vector3(0, 0, 0) },
+      uGlassGain:   { value: new THREE.Vector3(0, 0, 0) },
       uKick:        { value: 1000 },
       uKickPeak:    { value: 0 },
     };
@@ -1628,6 +1676,7 @@ class Core {
     this.uniforms.uSkin.value = skin;
     this.uniforms.uSpotLife.value = p.spotLife;
     this.uniforms.uRingGain.value.set(p.swell, p.ripple, p.glow);
+    this.uniforms.uGlassGain.value.set(p.cloud, p.fringe, p.ember);
     this.uniforms.uColorCore.value.set(palette.core);
     this.uniforms.uColorInner.value.set(palette.rayInner);
     this.uniforms.uColorOuter.value.set(palette.rayOuter);
